@@ -49,7 +49,7 @@ const env = {
         process.env.LARAVEL_TENANT_DATABASE ||
         process.env.LARAVEL_DATABASE ||
         process.env.TENANT_DATABASE ||
-        "",
+        "sigcrm_intelho",
     laravelTrunkEventsEnabled: toBoolean(
         process.env.LARAVEL_TRUNK_EVENTS_ENABLED ||
             process.env.PBX_LARAVEL_EVENTS_ENABLED,
