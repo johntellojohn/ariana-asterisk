@@ -72,6 +72,28 @@ function stop() {
 function handleManagerEvent(event) {
     const eventName = normalizeEventName(event);
 
+    if (env.pbxLogRawEvents) {
+        console.log("[pbx:event:raw]", {
+            event: eventName || event.event || event.Event || "",
+            channel: event.channel || event.Channel || "",
+            caller: event.calleridnum || event.CallerIDNum || "",
+            destination:
+                event.destination ||
+                event.Destination ||
+                event.dialstring ||
+                event.DialString ||
+                event.exten ||
+                event.Exten ||
+                "",
+            linkedid:
+                event.linkedid ||
+                event.Linkedid ||
+                event.uniqueid ||
+                event.Uniqueid ||
+                "",
+        });
+    }
+
     if (!trackedEvents.has(eventName)) {
         return;
     }
@@ -111,6 +133,7 @@ function handleManagerEvent(event) {
             "",
     };
 
+    logTrackedEvent(normalized);
     callEvents.push(normalized);
 
     while (callEvents.length > env.pbxMaxEvents) {
@@ -118,6 +141,7 @@ function handleManagerEvent(event) {
     }
 
     updateCallSummary(normalized);
+    logCallSummary(normalized.linkedid);
     notifyLaravel(normalized);
 }
 
@@ -298,6 +322,7 @@ function getCallByLinkedId(linkedid) {
 async function hangupCall(linkedid, reason = "laravel_hangup") {
     validateRequired({ linkedid });
     ensureReady();
+    console.log("[pbx:action] hangup requested", { linkedid, reason });
 
     const call = callsByLinkedId.get(linkedid);
 
@@ -335,6 +360,11 @@ async function connectCallToExtension(linkedid, extension, context = env.pbxOrig
     validateRequired({ linkedid, extension });
     ensureReady();
     const targetContext = context || env.pbxOriginateContext;
+    console.log("[pbx:action] connect call to extension requested", {
+        linkedid,
+        extension,
+        context: targetContext,
+    });
 
     const call = callsByLinkedId.get(linkedid);
 
@@ -375,16 +405,41 @@ function primaryCallChannel(call) {
 
 function notifyLaravel(event) {
     if (!env.laravelTrunkEventsEnabled) {
+        if (env.pbxLogLaravelCallbacks) {
+            console.log("[pbx:laravel] callback skipped because LARAVEL_TRUNK_EVENTS_ENABLED=false", {
+                linkedid: event.linkedid || null,
+                event: event.event || null,
+            });
+        }
         return;
     }
 
     const summary = event.linkedid ? getCallByLinkedId(event.linkedid) : null;
+    const payload = {
+        event,
+        summary,
+        source: "ariana-asterisk-pbx",
+    };
+
+    if (env.pbxLogLaravelCallbacks) {
+        console.log("[pbx:laravel] sending trunk event", {
+            linkedid: event.linkedid || null,
+            event: event.event || null,
+            url: `${env.laravelApiUrl.replace(/\/$/, "")}${env.laravelTrunkEventsPath}`,
+            hasSummary: Boolean(summary),
+        });
+    }
 
     laravelService
-        .sendTrunkCallEvent({
-            event,
-            summary,
-            source: "ariana-asterisk-pbx",
+        .sendTrunkCallEvent(payload)
+        .then((response) => {
+            if (env.pbxLogLaravelCallbacks) {
+                console.log("[pbx:laravel] trunk event accepted", {
+                    linkedid: event.linkedid || null,
+                    event: event.event || null,
+                    response,
+                });
+            }
         })
         .catch((error) => {
             console.error("[pbx] Laravel trunk event callback failed", {
@@ -398,6 +453,10 @@ function notifyLaravel(event) {
 
 async function originateExtension(fromExtension, toExtension) {
     validateRequired({ fromExtension, toExtension });
+    console.log("[pbx:action] originate extension requested", {
+        fromExtension,
+        toExtension,
+    });
 
     return originate({
         Channel: `PJSIP/${fromExtension}`,
@@ -412,6 +471,10 @@ async function originateExtension(fromExtension, toExtension) {
 
 async function originateExternal(fromExtension, phoneNumber) {
     validateRequired({ fromExtension, phoneNumber });
+    console.log("[pbx:action] originate external requested", {
+        fromExtension,
+        phoneNumber,
+    });
 
     return originate({
         Channel: `PJSIP/${fromExtension}`,
@@ -426,6 +489,10 @@ async function originateExternal(fromExtension, phoneNumber) {
 
 async function originateDirect(phoneNumber, trunkEndpoint = env.pbxDirectTrunkEndpoint) {
     validateRequired({ phoneNumber, trunkEndpoint });
+    console.log("[pbx:action] originate direct requested", {
+        phoneNumber,
+        trunkEndpoint,
+    });
 
     return originate({
         Channel: `PJSIP/${phoneNumber}@${trunkEndpoint}`,
@@ -453,6 +520,7 @@ function validateRequired(fields) {
 
 function originate(action) {
     ensureReady();
+    console.log("[pbx:ami-action] Originate", action);
 
     return new Promise((resolve, reject) => {
         ami.action(
@@ -472,6 +540,8 @@ function originate(action) {
 }
 
 function hangupChannel(channel, reason) {
+    console.log("[pbx:ami-action] Hangup", { channel, reason });
+
     return new Promise((resolve, reject) => {
         ami.action(
             {
@@ -492,6 +562,8 @@ function hangupChannel(channel, reason) {
 }
 
 function redirectChannel(channel, target) {
+    console.log("[pbx:ami-action] Redirect", { channel, ...target });
+
     return new Promise((resolve, reject) => {
         ami.action(
             {
@@ -509,6 +581,48 @@ function redirectChannel(channel, target) {
                 return resolve(response);
             }
         );
+    });
+}
+
+function logTrackedEvent(event) {
+    if (!env.pbxLogTrackedEvents) {
+        return;
+    }
+
+    console.log("[pbx:event:tracked]", {
+        event: event.event,
+        linkedid: event.linkedid,
+        caller: event.caller,
+        destination: event.destination,
+        channel: event.channel,
+        destChannel: event.destChannel,
+        dialStatus: event.dialStatus,
+        cause: event.cause,
+        causeTxt: event.causeTxt,
+    });
+}
+
+function logCallSummary(linkedid) {
+    if (!env.pbxLogTrackedEvents || !linkedid) {
+        return;
+    }
+
+    const call = callsByLinkedId.get(linkedid);
+
+    if (!call) {
+        return;
+    }
+
+    console.log("[pbx:call:summary]", {
+        linkedid: call.linkedid,
+        from: call.from,
+        to: call.to,
+        status: call.status,
+        answered: call.answered,
+        bridged: call.bridged,
+        result: call.result,
+        channels: call.channels,
+        totalEvents: call.events.length,
     });
 }
 
