@@ -2,7 +2,14 @@ const AsteriskManager = require("asterisk-manager");
 const env = require("../../config/env");
 const laravelService = require("../laravel/laravel.service");
 
-const trackedEvents = new Set(["dialbegin", "dialend", "bridgeenter", "hangup"]);
+const trackedEvents = new Set([
+    "dialbegin",
+    "dialend",
+    "dialstate",
+    "bridgeenter",
+    "bridgeleave",
+    "hangup",
+]);
 
 let ami = null;
 let started = false;
@@ -12,6 +19,8 @@ let lastAmiError = null;
 
 const callEvents = [];
 const callsByLinkedId = new Map();
+const rawEventsByLinkedId = new Map();
+const actionsByLinkedId = new Map();
 
 function start() {
     if (!env.pbxAmiEnabled) {
@@ -72,27 +81,12 @@ function stop() {
 
 function handleManagerEvent(event) {
     const eventName = normalizeEventName(event);
+    const raw = normalizeRawEvent(event, eventName);
+
+    rememberRawEvent(raw);
 
     if (env.pbxLogRawEvents) {
-        console.log("[pbx:event:raw]", {
-            event: eventName || event.event || event.Event || "",
-            channel: event.channel || event.Channel || "",
-            caller: event.calleridnum || event.CallerIDNum || "",
-            destination:
-                event.destination ||
-                event.Destination ||
-                event.dialstring ||
-                event.DialString ||
-                event.exten ||
-                event.Exten ||
-                "",
-            linkedid:
-                event.linkedid ||
-                event.Linkedid ||
-                event.uniqueid ||
-                event.Uniqueid ||
-                "",
-        });
+        console.log("[pbx:event:raw]", raw);
     }
 
     if (!trackedEvents.has(eventName)) {
@@ -148,6 +142,54 @@ function handleManagerEvent(event) {
 
 function normalizeEventName(event) {
     return String(event.event || event.Event || "").toLowerCase().trim();
+}
+
+function normalizeRawEvent(event, eventName = normalizeEventName(event)) {
+    return {
+        time: new Date().toISOString(),
+        event: eventName || event.event || event.Event || "",
+        channel: event.channel || event.Channel || "",
+        caller: event.calleridnum || event.CallerIDNum || "",
+        destination:
+            event.destination ||
+            event.Destination ||
+            event.dialstring ||
+            event.DialString ||
+            event.exten ||
+            event.Exten ||
+            "",
+        destChannel: event.destchannel || event.DestChannel || "",
+        dialStatus: event.dialstatus || event.DialStatus || "",
+        state: event.channelstatedesc || event.ChannelStateDesc || event.state || event.State || "",
+        application: event.application || event.Application || "",
+        appData: event.appdata || event.AppData || "",
+        cause: event.cause || event.Cause || "",
+        causeTxt: event["cause-txt"] || event.causetxt || event.CauseTxt || "",
+        linkedid:
+            event.linkedid ||
+            event.Linkedid ||
+            event.uniqueid ||
+            event.Uniqueid ||
+            "",
+        uniqueid: event.uniqueid || event.Uniqueid || "",
+    };
+}
+
+function rememberRawEvent(event) {
+    if (!event.linkedid) {
+        return;
+    }
+
+    if (!rawEventsByLinkedId.has(event.linkedid)) {
+        rawEventsByLinkedId.set(event.linkedid, []);
+    }
+
+    const items = rawEventsByLinkedId.get(event.linkedid);
+    items.push(event);
+
+    while (items.length > env.pbxMaxEvents) {
+        items.shift();
+    }
 }
 
 function updateCallSummary(event) {
@@ -320,6 +362,52 @@ function getCallByLinkedId(linkedid) {
     };
 }
 
+function getCallDiagnostics(linkedid) {
+    const call = getCallByLinkedId(linkedid);
+
+    if (!call) {
+        return null;
+    }
+
+    const rawEvents = rawEventsByLinkedId.get(linkedid) || [];
+    const actions = actionsByLinkedId.get(linkedid) || [];
+    const allEvents = [...rawEvents, ...call.events];
+    const hasAnswer = allEvents.some((event) => String(event.dialStatus || "").toUpperCase() === "ANSWER");
+    const hasBridge = allEvents.some((event) => ["bridgeenter", "bridgeleave"].includes(String(event.event || "").toLowerCase()));
+    const hangups = allEvents.filter((event) => String(event.event || "").toLowerCase().includes("hangup"));
+    const requestedConnect = actions.some((action) => action.action === "connect_extension_requested");
+    const alreadyDialing = actions.some((action) => action.action === "connect_extension_already_dialing");
+    const redirectSent = actions.some((action) => action.action === "connect_extension_redirect_sent");
+
+    return {
+        linkedid,
+        summary: call,
+        diagnosis: buildDiagnosis({
+            call,
+            hasAnswer,
+            hasBridge,
+            hangups,
+            requestedConnect,
+            alreadyDialing,
+            redirectSent,
+        }),
+        facts: {
+            hasAnswer,
+            hasBridge,
+            requestedConnect,
+            alreadyDialing,
+            redirectSent,
+            hangupCount: hangups.length,
+            rawEventCount: rawEvents.length,
+            trackedEventCount: call.events.length,
+            actionCount: actions.length,
+        },
+        actions,
+        recentRawEvents: rawEvents.slice(-80),
+        recentTrackedEvents: call.events.slice(-40),
+    };
+}
+
 async function getAmiStatus() {
     ensureReady();
     console.log("[pbx:ami-action] Status");
@@ -333,6 +421,7 @@ async function hangupCall(linkedid, reason = "laravel_hangup") {
     validateRequired({ linkedid });
     ensureReady();
     console.log("[pbx:action] hangup requested", { linkedid, reason });
+    rememberAction(linkedid, "hangup_requested", { reason });
 
     const call = callsByLinkedId.get(linkedid);
 
@@ -375,6 +464,10 @@ async function connectCallToExtension(linkedid, extension, context = env.pbxOrig
         extension,
         context: targetContext,
     });
+    rememberAction(linkedid, "connect_extension_requested", {
+        extension,
+        context: targetContext,
+    });
 
     const call = callsByLinkedId.get(linkedid);
 
@@ -395,6 +488,10 @@ async function connectCallToExtension(linkedid, extension, context = env.pbxOrig
     if (existingExtensionChannels.length > 0) {
         console.log("[pbx:action] call already dialing requested extension", {
             linkedid,
+            extension,
+            channels: existingExtensionChannels,
+        });
+        rememberAction(linkedid, "connect_extension_already_dialing", {
             extension,
             channels: existingExtensionChannels,
         });
@@ -420,13 +517,22 @@ async function connectCallToExtension(linkedid, extension, context = env.pbxOrig
         context: targetContext,
         extension,
         priority: env.pbxOriginatePriority,
-    }).then((response) => ({
-        linkedid,
-        channel,
-        context: targetContext,
-        extension,
-        response,
-    }));
+    }).then((response) => {
+        rememberAction(linkedid, "connect_extension_redirect_sent", {
+            channel,
+            extension,
+            context: targetContext,
+            response,
+        });
+
+        return {
+            linkedid,
+            channel,
+            context: targetContext,
+            extension,
+            response,
+        };
+    });
 }
 
 function primaryCallChannel(call) {
@@ -479,6 +585,106 @@ function referencesExtension(value, extension) {
         withoutTech.startsWith(`${target}/`) ||
         withoutTech.startsWith(`${target}@`) ||
         withoutTech.includes(`:${target}@`);
+}
+
+function rememberAction(linkedid, action, details = {}) {
+    if (!linkedid) {
+        return;
+    }
+
+    if (!actionsByLinkedId.has(linkedid)) {
+        actionsByLinkedId.set(linkedid, []);
+    }
+
+    const items = actionsByLinkedId.get(linkedid);
+    items.push({
+        time: new Date().toISOString(),
+        action,
+        details,
+    });
+
+    while (items.length > 80) {
+        items.shift();
+    }
+}
+
+function buildDiagnosis({
+    call,
+    hasAnswer,
+    hasBridge,
+    hangups,
+    requestedConnect,
+    alreadyDialing,
+    redirectSent,
+}) {
+    if (hasBridge || hasAnswer || call.answered || call.bridged) {
+        return {
+            level: "media",
+            message: "Asterisk reporto llamada contestada/puenteada. Si no hay audio, revisar RTP, NAT, codecs o direct media.",
+            nextSteps: [
+                "En Asterisk ejecutar: rtp set debug on",
+                "Confirmar trafico RTP entre FXO/Asterisk y la extension",
+                "Revisar direct_media=no, rtp_symmetric=yes, force_rport=yes, rewrite_contact=yes",
+            ],
+        };
+    }
+
+    if (alreadyDialing) {
+        return {
+            level: "signaling",
+            message: "La llamada ya estaba timbrando en la extension solicitada, pero Asterisk no reporto ANSWER ni bridgeenter.",
+            nextSteps: [
+                "Contestar desde el telefono o Zoiper de esa extension",
+                "Revisar si la extension esta registrada y realmente contesta la llamada",
+                "En consola Asterisk buscar DialStatus ANSWER o BridgeEnter",
+            ],
+        };
+    }
+
+    if (redirectSent) {
+        return {
+            level: "signaling",
+            message: "Ariana envio Redirect hacia la extension, pero Asterisk no reporto llamada contestada.",
+            nextSteps: [
+                "Revisar contexto/exten/prioridad usados en Redirect",
+                "Confirmar que la extension existe y esta registrada",
+                "Buscar en Asterisk errores de dialplan o PJSIP al redirigir",
+            ],
+        };
+    }
+
+    if (!requestedConnect) {
+        return {
+            level: "eva",
+            message: "Ariana recibio eventos de llamada, pero no recibio la orden de EVA para conectar la extension.",
+            nextSteps: [
+                "Revisar URL/token TRUNCAL en EVA",
+                "Revisar last_error en trunk_calls",
+                "Confirmar que el boton Responder llama a /api/pbx/calls/{linkedid}/connect-extension",
+            ],
+        };
+    }
+
+    if (hangups.length > 0 || ["CANCEL", "HANGUP"].includes(String(call.status || "").toUpperCase())) {
+        return {
+            level: "pbx",
+            message: "La llamada termino antes de quedar contestada.",
+            nextSteps: [
+                "Revisar ruta entrante de FreePBX/Asterisk",
+                "Evitar que la troncal cuelgue antes de que el agente conteste",
+                "Revisar hangup cause y logs del dialplan",
+            ],
+        };
+    }
+
+    return {
+        level: "unknown",
+        message: "No hay suficientes eventos para determinar la causa.",
+        nextSteps: [
+            "Repetir prueba con logs crudos activos",
+            "Consultar este endpoint justo despues de presionar Responder",
+        ],
+    };
 }
 
 function notifyLaravel(event) {
@@ -741,6 +947,7 @@ module.exports = {
     getCallEvents,
     getCallsSummary,
     getCallByLinkedId,
+    getCallDiagnostics,
     getAmiStatus,
     hangupCall,
     connectCallToExtension,

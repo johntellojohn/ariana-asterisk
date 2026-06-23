@@ -43,6 +43,22 @@ function showCall(req, res) {
     });
 }
 
+function callDiagnostics(req, res) {
+    const diagnostics = pbxService.getCallDiagnostics(req.params.linkedid);
+
+    if (!diagnostics) {
+        return res.status(404).json({
+            ok: false,
+            message: "PBX call not found",
+        });
+    }
+
+    return res.json({
+        ok: true,
+        data: diagnostics,
+    });
+}
+
 async function amiStatus(req, res, next) {
     try {
         const response = await pbxService.getAmiStatus();
@@ -142,6 +158,7 @@ module.exports = {
     callEvents,
     callsSummary,
     showCall,
+    callDiagnostics,
     amiStatus,
     hangupCall,
     connectCallToExtension,

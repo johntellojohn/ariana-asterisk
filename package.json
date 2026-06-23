@@ -8,6 +8,7 @@
     "start": "node src/server.js",
     "check": "node scripts/check-js.js",
     "check:pbx": "node scripts/check-pbx-ami.js",
+    "diagnose:call": "node scripts/diagnose-call.js",
     "test:trunk-callback": "node scripts/test-trunk-callback.js",
     "docker:up": "docker compose up -d --build",
     "docker:down": "docker compose down",

@@ -12,6 +12,7 @@ router.get("/events", pbxController.callEvents);
 router.get("/calls", pbxController.callsSummary);
 router.get("/ami/status", pbxController.amiStatus);
 router.get("/calls/:linkedid", pbxController.showCall);
+router.get("/calls/:linkedid/diagnostics", pbxController.callDiagnostics);
 router.post("/calls/:linkedid/hangup", pbxController.hangupCall);
 router.post("/calls/:linkedid/connect-extension", pbxController.connectCallToExtension);
 router.post("/originate/extension", pbxController.originateExtension);
