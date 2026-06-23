@@ -384,6 +384,30 @@ async function connectCallToExtension(linkedid, extension, context = env.pbxOrig
         throw error;
     }
 
+    if (isFinalCallStatus(call.status)) {
+        const error = new Error(`PBX call is no longer active (${call.status})`);
+        error.status = 409;
+        throw error;
+    }
+
+    const existingExtensionChannels = channelsForExtension(call, extension);
+
+    if (existingExtensionChannels.length > 0) {
+        console.log("[pbx:action] call already dialing requested extension", {
+            linkedid,
+            extension,
+            channels: existingExtensionChannels,
+        });
+
+        return {
+            linkedid,
+            extension,
+            alreadyDialing: true,
+            channels: existingExtensionChannels,
+            message: "PBX call is already dialing the requested extension",
+        };
+    }
+
     const channel = primaryCallChannel(call);
 
     if (!channel) {
@@ -411,6 +435,50 @@ function primaryCallChannel(call) {
         .find((event) => event.event === "dialbegin" && event.channel);
 
     return dialBegin?.channel || call.channels[0] || "";
+}
+
+function isFinalCallStatus(status) {
+    return ["BUSY", "NOANSWER", "CANCEL", "CHANUNAVAIL", "CONGESTION", "HANGUP"]
+        .includes(String(status || "").toUpperCase());
+}
+
+function channelsForExtension(call, extension) {
+    const channels = new Set();
+
+    for (const channel of call.channels || []) {
+        if (referencesExtension(channel, extension)) {
+            channels.add(channel);
+        }
+    }
+
+    for (const event of call.events || []) {
+        if (referencesExtension(event.channel, extension)) {
+            channels.add(event.channel);
+        }
+
+        if (referencesExtension(event.destChannel, extension)) {
+            channels.add(event.destChannel);
+        }
+    }
+
+    return [...channels].filter(Boolean);
+}
+
+function referencesExtension(value, extension) {
+    const target = String(extension || "").trim();
+    const text = String(value || "").trim();
+
+    if (!target || !text) {
+        return false;
+    }
+
+    const withoutTech = text.replace(/^(PJSIP|SIP|IAX2|DAHDI)\//i, "");
+
+    return withoutTech === target ||
+        withoutTech.startsWith(`${target}-`) ||
+        withoutTech.startsWith(`${target}/`) ||
+        withoutTech.startsWith(`${target}@`) ||
+        withoutTech.includes(`:${target}@`);
 }
 
 function notifyLaravel(event) {
