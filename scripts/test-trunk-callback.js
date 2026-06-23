@@ -7,6 +7,8 @@ async function main() {
 
     const payload = {
         source: "ariana-asterisk-pbx-test",
+        tenant: process.env.LARAVEL_TENANT_DATABASE || process.env.LARAVEL_DATABASE || process.env.TENANT_DATABASE || undefined,
+        database: process.env.LARAVEL_TENANT_DATABASE || process.env.LARAVEL_DATABASE || process.env.TENANT_DATABASE || undefined,
         event: {
             time: now,
             event: "dialbegin",

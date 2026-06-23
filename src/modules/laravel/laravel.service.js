@@ -6,8 +6,9 @@ async function sendTrunkCallEvent(payload) {
         ? env.laravelTrunkEventsPath
         : `/${env.laravelTrunkEventsPath}`;
     const url = `${env.laravelApiUrl.replace(/\/$/, "")}${path}`;
+    const body = withTenantMetadata(payload);
 
-    const response = await axios.post(url, payload, {
+    const response = await axios.post(url, body, {
         headers: {
             Accept: "application/json",
             "Content-Type": "application/json",
@@ -19,6 +20,23 @@ async function sendTrunkCallEvent(payload) {
     });
 
     return response.data;
+}
+
+function withTenantMetadata(payload) {
+    if (!env.laravelTenantDatabase) {
+        return payload;
+    }
+
+    return {
+        ...payload,
+        tenant: payload.tenant || env.laravelTenantDatabase,
+        database: payload.database || env.laravelTenantDatabase,
+        metadata: {
+            ...(payload.metadata || {}),
+            tenant: payload.metadata?.tenant || env.laravelTenantDatabase,
+            database: payload.metadata?.database || env.laravelTenantDatabase,
+        },
+    };
 }
 
 module.exports = {

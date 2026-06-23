@@ -45,6 +45,11 @@ const env = {
 
     laravelApiUrl: process.env.LARAVEL_API_URL || "http://localhost",
     laravelApiToken: process.env.LARAVEL_API_TOKEN || "",
+    laravelTenantDatabase:
+        process.env.LARAVEL_TENANT_DATABASE ||
+        process.env.LARAVEL_DATABASE ||
+        process.env.TENANT_DATABASE ||
+        "",
     laravelTrunkEventsEnabled: toBoolean(
         process.env.LARAVEL_TRUNK_EVENTS_ENABLED ||
             process.env.PBX_LARAVEL_EVENTS_ENABLED,

@@ -13,6 +13,7 @@ Asterisk/Grandstream AMI -> Ariana Asterisk -> EVA
 
 EVA debe apuntar la integracion `TRUNCAL.url` a la URL publica de este servicio.
 El token de la integracion `TRUNCAL` debe ser el mismo de `ASTERISK_API_TOKEN` y `LARAVEL_API_TOKEN`.
+Si EVA debe guardar la llamada en una base tenant, configura `LARAVEL_TENANT_DATABASE` con el nombre de esa base.
 
 ## Endpoints
 
