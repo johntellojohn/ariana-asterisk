@@ -10,6 +10,18 @@ const trackedEvents = new Set([
     "bridgeleave",
     "hangup",
 ]);
+const conciseRawEvents = new Set([
+    "dialbegin",
+    "dialend",
+    "dialstate",
+    "bridgeenter",
+    "bridgeleave",
+    "hangup",
+    "hanguprequest",
+    "softhanguprequest",
+    "newchannel",
+    "newstate",
+]);
 
 let ami = null;
 let started = false;
@@ -85,7 +97,7 @@ function handleManagerEvent(event) {
 
     rememberRawEvent(raw);
 
-    if (env.pbxLogRawEvents) {
+    if (shouldLogRawEvent(raw)) {
         console.log("[pbx:event:raw]", raw);
     }
 
@@ -190,6 +202,22 @@ function rememberRawEvent(event) {
     while (items.length > env.pbxMaxEvents) {
         items.shift();
     }
+}
+
+function shouldLogRawEvent(event) {
+    if (!env.pbxLogRawEvents) {
+        return false;
+    }
+
+    if (env.pbxLogVerboseRawEvents) {
+        return true;
+    }
+
+    if (!event.linkedid) {
+        return false;
+    }
+
+    return conciseRawEvents.has(String(event.event || "").toLowerCase());
 }
 
 function updateCallSummary(event) {

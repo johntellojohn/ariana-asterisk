@@ -70,6 +70,7 @@ const env = {
     pbxAmiEventMask: process.env.PBX_AMI_EVENT_MASK || "on",
     pbxLogTrackedEvents: toBoolean(process.env.PBX_LOG_TRACKED_EVENTS, true),
     pbxLogRawEvents: toBoolean(process.env.PBX_LOG_RAW_EVENTS, false),
+    pbxLogVerboseRawEvents: toBoolean(process.env.PBX_LOG_VERBOSE_RAW_EVENTS, false),
     pbxLogLaravelCallbacks: toBoolean(process.env.PBX_LOG_LARAVEL_CALLBACKS, true),
     pbxMaxEvents: toNumber(process.env.PBX_MAX_EVENTS, 300),
     pbxOriginateContext: process.env.PBX_ORIGINATE_CONTEXT || "from-internal",
