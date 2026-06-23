@@ -10,6 +10,7 @@ router.use(requireApiToken);
 router.get("/health", pbxController.health);
 router.get("/events", pbxController.callEvents);
 router.get("/calls", pbxController.callsSummary);
+router.get("/ami/status", pbxController.amiStatus);
 router.get("/calls/:linkedid", pbxController.showCall);
 router.post("/calls/:linkedid/hangup", pbxController.hangupCall);
 router.post("/calls/:linkedid/connect-extension", pbxController.connectCallToExtension);

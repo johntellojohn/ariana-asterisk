@@ -62,6 +62,7 @@ const env = {
     pbxAmiUsername: process.env.PBX_AMI_USERNAME || "",
     pbxAmiPassword: process.env.PBX_AMI_PASSWORD || "",
     pbxAmiReconnect: toBoolean(process.env.PBX_AMI_RECONNECT, true),
+    pbxAmiEventMask: process.env.PBX_AMI_EVENT_MASK || "on",
     pbxLogTrackedEvents: toBoolean(process.env.PBX_LOG_TRACKED_EVENTS, true),
     pbxLogRawEvents: toBoolean(process.env.PBX_LOG_RAW_EVENTS, false),
     pbxLogLaravelCallbacks: toBoolean(process.env.PBX_LOG_LARAVEL_CALLBACKS, true),

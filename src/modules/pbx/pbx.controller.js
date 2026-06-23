@@ -43,6 +43,19 @@ function showCall(req, res) {
     });
 }
 
+async function amiStatus(req, res, next) {
+    try {
+        const response = await pbxService.getAmiStatus();
+
+        res.json({
+            ok: true,
+            data: response,
+        });
+    } catch (error) {
+        next(error);
+    }
+}
+
 async function hangupCall(req, res, next) {
     try {
         const response = await pbxService.hangupCall(
@@ -129,6 +142,7 @@ module.exports = {
     callEvents,
     callsSummary,
     showCall,
+    amiStatus,
     hangupCall,
     connectCallToExtension,
     originateExtension,

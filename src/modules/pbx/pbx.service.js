@@ -39,6 +39,7 @@ function start() {
         connected = true;
         lastAmiError = null;
         console.log(`[pbx] AMI connected to ${env.pbxAmiHost}:${env.pbxAmiPort}`);
+        enableAmiEvents();
     });
 
     ami.on("disconnect", () => {
@@ -319,6 +320,15 @@ function getCallByLinkedId(linkedid) {
     };
 }
 
+async function getAmiStatus() {
+    ensureReady();
+    console.log("[pbx:ami-action] Status");
+
+    return runAmiAction({
+        Action: "Status",
+    });
+}
+
 async function hangupCall(linkedid, reason = "laravel_hangup") {
     validateRequired({ linkedid });
     ensureReady();
@@ -522,65 +532,69 @@ function originate(action) {
     ensureReady();
     console.log("[pbx:ami-action] Originate", action);
 
-    return new Promise((resolve, reject) => {
-        ami.action(
-            {
-                Action: "Originate",
-                ...action,
-            },
-            (error, response) => {
-                if (error) {
-                    return reject(error);
-                }
-
-                return resolve(response);
-            }
-        );
+    return runAmiAction({
+        Action: "Originate",
+        ...action,
     });
 }
 
 function hangupChannel(channel, reason) {
     console.log("[pbx:ami-action] Hangup", { channel, reason });
 
-    return new Promise((resolve, reject) => {
-        ami.action(
-            {
-                Action: "Hangup",
-                Channel: channel,
-                Cause: env.pbxHangupCause,
-                Reason: reason,
-            },
-            (error, response) => {
-                if (error) {
-                    return reject(error);
-                }
-
-                return resolve(response);
-            }
-        );
+    return runAmiAction({
+        Action: "Hangup",
+        Channel: channel,
+        Cause: env.pbxHangupCause,
+        Reason: reason,
     });
 }
 
 function redirectChannel(channel, target) {
     console.log("[pbx:ami-action] Redirect", { channel, ...target });
 
-    return new Promise((resolve, reject) => {
-        ami.action(
-            {
-                Action: "Redirect",
-                Channel: channel,
-                Context: target.context,
-                Exten: target.extension,
-                Priority: target.priority,
-            },
-            (error, response) => {
-                if (error) {
-                    return reject(error);
-                }
+    return runAmiAction({
+        Action: "Redirect",
+        Channel: channel,
+        Context: target.context,
+        Exten: target.extension,
+        Priority: target.priority,
+    });
+}
 
-                return resolve(response);
+function enableAmiEvents() {
+    if (!env.pbxAmiEventMask) {
+        return;
+    }
+
+    const action = {
+        Action: "Events",
+        EventMask: env.pbxAmiEventMask,
+    };
+
+    console.log("[pbx:ami-action] Events", action);
+
+    runAmiAction(action)
+        .then((response) => {
+            console.log("[pbx:ami-action] Events response", response);
+        })
+        .catch((error) => {
+            console.error("[pbx:ami-action] Events failed", {
+                message: error.message,
+            });
+        });
+}
+
+function runAmiAction(action) {
+    ensureAmiInstance();
+
+    return new Promise((resolve, reject) => {
+        ami.action(action, (error, response) => {
+            if (error) {
+                return reject(error);
             }
-        );
+
+            return resolve(response);
+        });
     });
 }
 
@@ -644,6 +658,14 @@ function ensureReady() {
     }
 }
 
+function ensureAmiInstance() {
+    if (!ami) {
+        const error = new Error(lastAmiError || "PBX AMI is not available");
+        error.status = 503;
+        throw error;
+    }
+}
+
 module.exports = {
     start,
     stop,
@@ -651,6 +673,7 @@ module.exports = {
     getCallEvents,
     getCallsSummary,
     getCallByLinkedId,
+    getAmiStatus,
     hangupCall,
     connectCallToExtension,
     originateExtension,

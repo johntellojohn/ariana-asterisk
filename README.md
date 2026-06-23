@@ -20,6 +20,7 @@ El token de la integracion `TRUNCAL` debe ser el mismo de `ASTERISK_API_TOKEN` y
 - `GET /api/pbx/health`
 - `GET /api/pbx/events`
 - `GET /api/pbx/calls`
+- `GET /api/pbx/ami/status`
 - `GET /api/pbx/calls/:linkedid`
 - `POST /api/pbx/calls/:linkedid/hangup`
 - `POST /api/pbx/calls/:linkedid/connect-extension`
