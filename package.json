@@ -1,0 +1,40 @@
+{
+  "name": "ariana-asterisk",
+  "version": "1.0.0",
+  "description": "Ariana Asterisk gateway for trunk calls over AMI.",
+  "main": "src/server.js",
+  "scripts": {
+    "dev": "nodemon src/server.js",
+    "start": "node src/server.js",
+    "check": "node scripts/check-js.js",
+    "check:pbx": "node scripts/check-pbx-ami.js",
+    "test:trunk-callback": "node scripts/test-trunk-callback.js",
+    "docker:up": "docker compose up -d --build",
+    "docker:down": "docker compose down",
+    "docker:logs": "docker compose logs -f api"
+  },
+  "keywords": [
+    "asterisk",
+    "ami",
+    "pbx",
+    "trunk"
+  ],
+  "author": "",
+  "license": "ISC",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "asterisk-manager": "^0.2.0",
+    "axios": "^1.16.1",
+    "compression": "^1.8.1",
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "helmet": "^8.2.0",
+    "morgan": "^1.10.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.14"
+  }
+}
