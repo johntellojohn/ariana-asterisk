@@ -506,8 +506,14 @@ async function connectCallToExtension(linkedid, extension, context = env.pbxOrig
     }
 
     if (isFinalCallStatus(call.status)) {
-        const error = new Error(`PBX call is no longer active (${call.status})`);
+        const error = new Error(`La llamada PBX ya no esta activa (${call.status}). Asterisk la cancelo/colgo antes de que EVA pudiera conectarla a la extension ${extension}.`);
         error.status = 409;
+        rememberAction(linkedid, "connect_extension_rejected_final_status", {
+            extension,
+            status: call.status,
+            result: call.result,
+            channels: call.channels,
+        });
         throw error;
     }
 
