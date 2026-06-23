@@ -44,6 +44,13 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
+Por defecto Docker publica el servicio en el puerto `366` del servidor:
+
+```text
+http://localhost:366/api/health
+http://localhost:366/api/pbx/health
+```
+
 ## Validacion
 
 Verificar sintaxis:

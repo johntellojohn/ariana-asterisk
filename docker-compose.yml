@@ -6,7 +6,7 @@ services:
     container_name: ariana-asterisk-gateway
     restart: unless-stopped
     ports:
-      - "${HOST_PORT:-329}:${PORT:-3002}"
+      - "${HOST_PORT:-366}:${PORT:-3002}"
     env_file:
       - .env
     volumes:
