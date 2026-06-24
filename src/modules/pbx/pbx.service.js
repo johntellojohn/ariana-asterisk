@@ -789,6 +789,17 @@ function buildDiagnosis({
 }
 
 function notifyLaravel(event) {
+    if (isExternalMediaLifecycleEvent(event)) {
+        if (env.pbxLogLaravelCallbacks) {
+            console.log("[pbx:laravel] external media event skipped", {
+                linkedid: event.linkedid || null,
+                event: event.event || null,
+                channel: event.channel || null,
+            });
+        }
+        return;
+    }
+
     if (!env.laravelTrunkEventsEnabled) {
         if (env.pbxLogLaravelCallbacks) {
             console.log("[pbx:laravel] callback skipped because LARAVEL_TRUNK_EVENTS_ENABLED=false", {
@@ -834,6 +845,13 @@ function notifyLaravel(event) {
                 status: error.response?.status,
             });
         });
+}
+
+function isExternalMediaLifecycleEvent(event) {
+    const channel = String(event.channel || "");
+    const eventName = String(event.event || "").toLowerCase();
+
+    return channel.startsWith("UnicastRTP/") && ["bridgeleave", "hangup"].includes(eventName);
 }
 
 async function originateExtension(fromExtension, toExtension) {
