@@ -85,6 +85,32 @@ ARI_EXTERNAL_MEDIA_FORMAT=ulaw
 Stasis(ariana-trunk)
 ```
 
+Si la llamada todavia entra a una extension como `107`, el gateway tambien puede rescatarla por AMI al presionar contestar en EVA y redirigirla a ARI. Para eso agrega este contexto en `/etc/asterisk/extensions_custom.conf`:
+
+```asterisk
+[ariana-ari]
+exten => s,1,NoOp(Ariana ARI trunk ${CHANNEL(linkedid)})
+ same => n,Answer()
+ same => n,Stasis(ariana-trunk)
+ same => n,Hangup()
+```
+
+Luego ejecuta:
+
+```bash
+fwconsole reload
+```
+
+Y deja estas variables en `.env`:
+
+```bash
+ARI_STASIS_REDIRECT_ENABLED=true
+ARI_STASIS_CONTEXT=ariana-ari
+ARI_STASIS_EXTENSION=s
+ARI_STASIS_PRIORITY=1
+ARI_STASIS_WAIT_MS=5000
+```
+
 5. Verifica estado:
 
 ```bash

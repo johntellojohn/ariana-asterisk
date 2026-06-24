@@ -3,6 +3,7 @@ const dgram = require("dgram");
 
 const env = require("../../config/env");
 const ariService = require("./ari.service");
+const pbxService = require("../pbx/pbx.service");
 const {
     parseRtpPacket,
     buildRtpPacket,
@@ -51,7 +52,12 @@ async function startMediaSessionByLinkedId(linkedid, options = {}) {
         return snapshotMediaSession(existing);
     }
 
-    const baseSession = ariService.getSessionByLinkedId(targetLinkedid);
+    let baseSession = ariService.getSessionByLinkedId(targetLinkedid);
+
+    if (!baseSession && env.ariStasisRedirectEnabled) {
+        await redirectTrackedCallToStasis(targetLinkedid);
+        baseSession = await waitForAriSession(targetLinkedid, env.ariStasisWaitMs);
+    }
 
     if (!baseSession) {
         const error = new Error("ARI session not found for linkedid");
@@ -80,6 +86,38 @@ async function startMediaSessionByLinkedId(linkedid, options = {}) {
         await closeMediaSession(mediaSession.id, "start_failed").catch(() => {});
         throw error;
     }
+}
+
+async function redirectTrackedCallToStasis(linkedid) {
+    try {
+        await pbxService.redirectCallToStasis(linkedid);
+    } catch (error) {
+        console.warn("[ari:media] redirect to Stasis failed", {
+            linkedid,
+            message: error.message,
+        });
+    }
+}
+
+async function waitForAriSession(linkedid, timeoutMs) {
+    const startedAt = Date.now();
+    const maxWait = Math.max(0, Number(timeoutMs || 0));
+
+    while (Date.now() - startedAt <= maxWait) {
+        const session = ariService.getSessionByLinkedId(linkedid);
+
+        if (session) {
+            return session;
+        }
+
+        await delay(150);
+    }
+
+    return null;
+}
+
+function delay(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function getMediaSession(idOrLinkedid) {

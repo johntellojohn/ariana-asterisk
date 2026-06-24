@@ -569,6 +569,73 @@ async function connectCallToExtension(linkedid, extension, context = env.pbxOrig
     });
 }
 
+async function redirectCallToStasis(linkedid) {
+    validateRequired({ linkedid });
+    ensureReady();
+
+    console.log("[pbx:action] redirect call to ARI Stasis requested", {
+        linkedid,
+        context: env.ariStasisContext,
+        extension: env.ariStasisExtension,
+        priority: env.ariStasisPriority,
+    });
+    rememberAction(linkedid, "redirect_stasis_requested", {
+        context: env.ariStasisContext,
+        extension: env.ariStasisExtension,
+        priority: env.ariStasisPriority,
+    });
+
+    const call = callsByLinkedId.get(linkedid);
+
+    if (!call) {
+        const error = new Error("PBX call not found");
+        error.status = 404;
+        throw error;
+    }
+
+    if (isFinalCallStatus(call.status)) {
+        const error = new Error(`La llamada PBX ya no esta activa (${call.status}). No se puede redirigir a ARI/Stasis.`);
+        error.status = 409;
+        rememberAction(linkedid, "redirect_stasis_rejected_final_status", {
+            status: call.status,
+            result: call.result,
+            channels: call.channels,
+        });
+        throw error;
+    }
+
+    const channel = primaryCallChannel(call);
+
+    if (!channel) {
+        const error = new Error("PBX call has no tracked channel to redirect to ARI/Stasis");
+        error.status = 409;
+        throw error;
+    }
+
+    const response = await redirectChannel(channel, {
+        context: env.ariStasisContext,
+        extension: env.ariStasisExtension,
+        priority: env.ariStasisPriority,
+    });
+
+    rememberAction(linkedid, "redirect_stasis_sent", {
+        channel,
+        context: env.ariStasisContext,
+        extension: env.ariStasisExtension,
+        priority: env.ariStasisPriority,
+        response,
+    });
+
+    return {
+        linkedid,
+        channel,
+        context: env.ariStasisContext,
+        extension: env.ariStasisExtension,
+        priority: env.ariStasisPriority,
+        response,
+    };
+}
+
 function primaryCallChannel(call) {
     const dialBegin = [...call.events]
         .reverse()
@@ -985,6 +1052,7 @@ module.exports = {
     getAmiStatus,
     hangupCall,
     connectCallToExtension,
+    redirectCallToStasis,
     originateExtension,
     originateExternal,
     originateDirect,
