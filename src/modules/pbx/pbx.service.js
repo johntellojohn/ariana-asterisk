@@ -470,10 +470,20 @@ async function hangupCall(linkedid, reason = "laravel_hangup") {
     const results = [];
 
     for (const channel of channels) {
-        results.push({
-            channel,
-            response: await hangupChannel(channel, reason),
-        });
+        try {
+            results.push({
+                channel,
+                ok: true,
+                response: await hangupChannel(channel, reason),
+            });
+        } catch (error) {
+            results.push({
+                channel,
+                ok: false,
+                error: error.message,
+                status: error.response?.status,
+            });
+        }
     }
 
     return {
