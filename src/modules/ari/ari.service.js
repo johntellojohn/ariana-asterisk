@@ -215,7 +215,21 @@ async function runAutoFlow(session) {
 async function answerSession(channelId) {
     const session = requireSession(channelId);
 
-    await ariRequest("post", `/channels/${encodeURIComponent(channelId)}/answer`);
+    if (session.answeredAt || session.channel?.state === "Up") {
+        session.status = "answered";
+        session.answeredAt = session.answeredAt || new Date().toISOString();
+        session.updatedAt = session.answeredAt;
+
+        return snapshotSession(session);
+    }
+
+    try {
+        await ariRequest("post", `/channels/${encodeURIComponent(channelId)}/answer`);
+    } catch (error) {
+        if (error.response?.status !== 422) {
+            throw error;
+        }
+    }
 
     session.status = "answered";
     session.answeredAt = new Date().toISOString();
@@ -412,6 +426,11 @@ function upsertSession(channel, attributes = {}) {
     session.linkedid = channel.linkedid || session.linkedid || channel.id;
     session.channel = normalizeChannel(channel);
     session.updatedAt = now;
+
+    if (channel.state === "Up" && !session.answeredAt) {
+        session.status = "answered";
+        session.answeredAt = now;
+    }
 
     Object.assign(session, attributes);
     sessionsByChannelId.set(channelId, session);
