@@ -83,6 +83,14 @@ async function startMediaSessionByLinkedId(linkedid, options = {}) {
 
         return snapshotMediaSession(mediaSession);
     } catch (error) {
+        console.error("[ari:media] start failed", {
+            linkedid: targetLinkedid,
+            message: error.message,
+            status: error.response?.status,
+            data: error.response?.data,
+            url: error.config?.url,
+            method: error.config?.method,
+        });
         await closeMediaSession(mediaSession.id, "start_failed").catch(() => {});
         throw error;
     }

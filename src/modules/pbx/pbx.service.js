@@ -799,6 +799,18 @@ function buildDiagnosis({
 }
 
 function notifyLaravel(event) {
+    if (isRedirectCancelEvent(event)) {
+        if (env.pbxLogLaravelCallbacks) {
+            console.log("[pbx:laravel] redirect cancel event skipped", {
+                linkedid: event.linkedid || null,
+                event: event.event || null,
+                channel: event.channel || null,
+                destChannel: event.destChannel || null,
+            });
+        }
+        return;
+    }
+
     if (isSecondaryRedirectLifecycleEvent(event)) {
         if (env.pbxLogLaravelCallbacks) {
             console.log("[pbx:laravel] secondary redirect event skipped", {
@@ -866,6 +878,14 @@ function notifyLaravel(event) {
                 status: error.response?.status,
             });
     });
+}
+
+function isRedirectCancelEvent(event) {
+    const actions = actionsByLinkedId.get(event.linkedid) || [];
+
+    return String(event.event || "").toLowerCase() === "dialend" &&
+        String(event.dialStatus || "").toUpperCase() === "CANCEL" &&
+        actions.some((item) => item.action === "redirect_stasis_requested" || item.action === "redirect_stasis_sent");
 }
 
 function isSecondaryRedirectLifecycleEvent(event) {
