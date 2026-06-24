@@ -79,6 +79,49 @@ const env = {
     pbxCallerIdPrefix: process.env.PBX_CALLER_ID_PREFIX || "Ariana",
     pbxDirectTrunkEndpoint: process.env.PBX_DIRECT_TRUNK_ENDPOINT || "fxo",
     pbxHangupCause: toNumber(process.env.PBX_HANGUP_CAUSE, 16),
+
+    ariEnabled: toBoolean(
+        process.env.ARI_ENABLED ||
+            process.env.ASTERISK_ARI_ENABLED,
+        false
+    ),
+    ariBaseUrl:
+        process.env.ARI_BASE_URL ||
+        process.env.ASTERISK_ARI_BASE_URL ||
+        "http://127.0.0.1:8088",
+    ariWsUrl:
+        process.env.ARI_WS_URL ||
+        process.env.ASTERISK_ARI_WS_URL ||
+        "",
+    ariUsername:
+        process.env.ARI_USERNAME ||
+        process.env.ASTERISK_ARI_USERNAME ||
+        "",
+    ariPassword:
+        process.env.ARI_PASSWORD ||
+        process.env.ASTERISK_ARI_PASSWORD ||
+        "",
+    ariAppName:
+        process.env.ARI_APP_NAME ||
+        process.env.ASTERISK_ARI_APP_NAME ||
+        "ariana-trunk",
+    ariReconnectMs: toNumber(process.env.ARI_RECONNECT_MS, 3000),
+    ariRequestTimeoutMs: toNumber(process.env.ARI_REQUEST_TIMEOUT_MS, 15000),
+    ariMaxEvents: toNumber(process.env.ARI_MAX_EVENTS, 300),
+    ariLaravelEventsEnabled: toBoolean(
+        process.env.ARI_LARAVEL_EVENTS_ENABLED,
+        false
+    ),
+    ariAutoAnswer: toBoolean(process.env.ARI_AUTO_ANSWER, false),
+    ariAutoBridge: toBoolean(process.env.ARI_AUTO_BRIDGE, false),
+    ariAutoPlaybackMedia: process.env.ARI_AUTO_PLAYBACK_MEDIA || "",
+    ariExternalMediaHost: process.env.ARI_EXTERNAL_MEDIA_HOST || "127.0.0.1",
+    ariExternalMediaBindHost: process.env.ARI_EXTERNAL_MEDIA_BIND_HOST || "0.0.0.0",
+    ariExternalMediaPortStart: toNumber(process.env.ARI_EXTERNAL_MEDIA_PORT_START, 46000),
+    ariExternalMediaPortEnd: toNumber(process.env.ARI_EXTERNAL_MEDIA_PORT_END, 46100),
+    ariExternalMediaFormat: process.env.ARI_EXTERNAL_MEDIA_FORMAT || "ulaw",
+    ariExternalMediaPayloadType: toNumber(process.env.ARI_EXTERNAL_MEDIA_PAYLOAD_TYPE, 0),
+    ariExternalMediaFrameMs: toNumber(process.env.ARI_EXTERNAL_MEDIA_FRAME_MS, 20),
 };
 
 module.exports = env;

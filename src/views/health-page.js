@@ -1,6 +1,7 @@
 function renderHealthPage(options) {
     const status = options.ok ? "Online" : "Attention";
     const checkedAt = options.timestamp || new Date().toISOString();
+    const ari = options.ari || {};
     const pbx = options.pbx || {};
 
     return `<!doctype html>
@@ -196,8 +197,10 @@ function renderHealthPage(options) {
         <section class="grid">
             ${metric("Servicio", options.service)}
             ${metric("AMI", pbx.connected ? "Conectado" : pbx.enabled ? "Esperando conexion" : "Desactivado")}
+            ${metric("ARI", ari.connected ? "Conectado" : ari.enabled ? "Esperando conexion" : "Desactivado")}
             ${metric("Host PBX", pbx.host ? `${pbx.host}:${pbx.port}` : "-")}
-            ${metric("Ultimo evento", pbx.lastAmiEventTime || "-")}
+            ${metric("App ARI", ari.appName || "-")}
+            ${metric("Ultimo evento", ari.lastEventTime || pbx.lastAmiEventTime || "-")}
         </section>
 
         <div class="footer">

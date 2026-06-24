@@ -1,4 +1,5 @@
 const env = require("../config/env");
+const ariService = require("../modules/ari/ari.service");
 const pbxService = require("../modules/pbx/pbx.service");
 const renderHealthPage = require("../views/health-page");
 
@@ -7,6 +8,7 @@ function index(req, res) {
         ok: true,
         service: env.appName,
         environment: env.nodeEnv,
+        ari: ariService.getStatus(),
         pbx: pbxService.getStatus(),
     };
 
@@ -20,6 +22,7 @@ function health(req, res) {
         timestamp: new Date().toISOString(),
         service: env.appName,
         environment: env.nodeEnv,
+        ari: ariService.getStatus(),
         pbx: pbxService.getStatus(),
     };
 
@@ -44,6 +47,7 @@ function respond(req, res, payload) {
         environment: payload.environment || env.nodeEnv,
         timestamp: payload.timestamp || new Date().toISOString(),
         endpoint: req.originalUrl,
+        ari: payload.ari,
         pbx: payload.pbx,
     }));
 }
