@@ -799,6 +799,17 @@ function buildDiagnosis({
 }
 
 function notifyLaravel(event) {
+    if (isSecondaryRedirectLifecycleEvent(event)) {
+        if (env.pbxLogLaravelCallbacks) {
+            console.log("[pbx:laravel] secondary redirect event skipped", {
+                linkedid: event.linkedid || null,
+                event: event.event || null,
+                channel: event.channel || null,
+            });
+        }
+        return;
+    }
+
     if (isExternalMediaLifecycleEvent(event)) {
         if (env.pbxLogLaravelCallbacks) {
             console.log("[pbx:laravel] external media event skipped", {
@@ -854,7 +865,26 @@ function notifyLaravel(event) {
                 message: error.message,
                 status: error.response?.status,
             });
-        });
+    });
+}
+
+function isSecondaryRedirectLifecycleEvent(event) {
+    const eventName = String(event.event || "").toLowerCase();
+
+    if (!["hangup", "bridgeleave"].includes(eventName) || !event.linkedid) {
+        return false;
+    }
+
+    const call = callsByLinkedId.get(event.linkedid);
+
+    if (!call || !call.events.some((item) => item.event === "dialend" && item.dialStatus === "CANCEL")) {
+        return false;
+    }
+
+    const primary = primaryCallChannel(call);
+    const channel = String(event.channel || "");
+
+    return Boolean(primary && channel && channel !== primary);
 }
 
 function isExternalMediaLifecycleEvent(event) {
