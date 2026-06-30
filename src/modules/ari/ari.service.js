@@ -266,11 +266,7 @@ async function ensureBridge(channelId) {
         throw error;
     }
 
-    await ariRequest("post", `/bridges/${encodeURIComponent(session.bridgeId)}/addChannel`, {
-        params: {
-            channel: channelId,
-        },
-    });
+    await addChannelToBridgeWithRetry(session.bridgeId, channelId);
 
     session.status = "bridged";
     session.updatedAt = new Date().toISOString();
@@ -607,6 +603,78 @@ function requireSessionByLinkedId(linkedid) {
     }
 
     return session;
+}
+
+async function addChannelToBridgeWithRetry(bridgeId, channelId) {
+    const startedAt = Date.now();
+    const maxWait = Math.max(0, Number(env.ariBridgeWaitMs || env.ariStasisWaitMs || 0));
+    let lastError = null;
+
+    while (Date.now() - startedAt <= maxWait) {
+        try {
+            await ariRequest("post", `/bridges/${encodeURIComponent(bridgeId)}/addChannel`, {
+                params: {
+                    channel: channelId,
+                },
+            });
+
+            if (lastError) {
+                console.log("[ari] bridge addChannel succeeded after retry", {
+                    channelId,
+                    bridgeId,
+                    waitedMs: Date.now() - startedAt,
+                });
+            }
+
+            return;
+        } catch (error) {
+            lastError = error;
+
+            if (!isRetryableBridgeAddChannelError(error)) {
+                throw error;
+            }
+
+            if (Date.now() - startedAt >= maxWait) {
+                break;
+            }
+
+            await delay(250);
+        }
+    }
+
+    console.warn("[ari] bridge addChannel failed after wait", {
+        channelId,
+        bridgeId,
+        waitedMs: Date.now() - startedAt,
+        status: lastError?.response?.status,
+        message: lastError?.message,
+        data: lastError?.response?.data,
+    });
+
+    throw lastError;
+}
+
+function isRetryableBridgeAddChannelError(error) {
+    const status = Number(error?.response?.status || error?.status || 0);
+    const message = String(error?.response?.data?.message || error?.message || "").toLowerCase();
+
+    if (status === 409 && message.includes("not in stasis")) {
+        return true;
+    }
+
+    if (status !== 422) {
+        return false;
+    }
+
+    return message === "" ||
+        message.includes("stasis") ||
+        message.includes("addchannel") ||
+        message.includes("add channel") ||
+        message.includes("channel");
+}
+
+function delay(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function findSessionByLinkedId(linkedid) {

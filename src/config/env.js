@@ -120,6 +120,7 @@ const env = {
     ariStasisExtension: process.env.ARI_STASIS_EXTENSION || "s",
     ariStasisPriority: toNumber(process.env.ARI_STASIS_PRIORITY, 1),
     ariStasisWaitMs: toNumber(process.env.ARI_STASIS_WAIT_MS, 5000),
+    ariBridgeWaitMs: toNumber(process.env.ARI_BRIDGE_WAIT_MS, 10000),
     ariExternalMediaHost: process.env.ARI_EXTERNAL_MEDIA_HOST || "127.0.0.1",
     ariExternalMediaBindHost: process.env.ARI_EXTERNAL_MEDIA_BIND_HOST || "0.0.0.0",
     ariExternalMediaPortStart: toNumber(process.env.ARI_EXTERNAL_MEDIA_PORT_START, 46000),
