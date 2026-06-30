@@ -353,6 +353,9 @@ function getStatus() {
         connected,
         baseUrl: safeBaseUrl(),
         appName: env.ariAppName,
+        buildVersion: env.buildVersion,
+        bridgeWaitMs: env.ariBridgeWaitMs,
+        stasisWaitMs: env.ariStasisWaitMs,
         lastConnectAttemptAt,
         lastEventTime,
         lastError,
@@ -633,6 +636,14 @@ async function addChannelToBridgeWithRetry(bridgeId, channelId) {
             if (!isRetryableBridgeAddChannelError(error)) {
                 throw error;
             }
+
+            console.warn("[ari] bridge addChannel waiting for Stasis", {
+                channelId,
+                bridgeId,
+                waitedMs: Date.now() - startedAt,
+                status: error?.response?.status,
+                message: error?.response?.data?.message || error?.message,
+            });
 
             if (Date.now() - startedAt >= maxWait) {
                 break;

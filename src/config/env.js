@@ -34,6 +34,7 @@ const env = {
     nodeEnv: process.env.NODE_ENV || "development",
     port: toNumber(process.env.PORT, 3002),
     appName: process.env.APP_NAME || "Ariana Asterisk Gateway",
+    buildVersion: process.env.APP_BUILD_VERSION || "ari-bridge-retry-v2",
     publicBaseUrl: process.env.PUBLIC_BASE_URL || "",
     corsOrigins: toList(process.env.CORS_ORIGINS, ["*"]),
     logLevel: process.env.LOG_LEVEL || "info",
