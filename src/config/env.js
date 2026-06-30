@@ -34,7 +34,7 @@ const env = {
     nodeEnv: process.env.NODE_ENV || "development",
     port: toNumber(process.env.PORT, 3002),
     appName: process.env.APP_NAME || "Ariana Asterisk Gateway",
-    buildVersion: process.env.APP_BUILD_VERSION || "ari-bridge-retry-v2",
+    buildVersion: process.env.APP_BUILD_VERSION || "ari-ai-trunk-v1",
     publicBaseUrl: process.env.PUBLIC_BASE_URL || "",
     corsOrigins: toList(process.env.CORS_ORIGINS, ["*"]),
     logLevel: process.env.LOG_LEVEL || "info",
@@ -46,6 +46,10 @@ const env = {
 
     laravelApiUrl: process.env.LARAVEL_API_URL || "http://localhost",
     laravelApiToken: process.env.LARAVEL_API_TOKEN || "",
+    laravelVoiceToolsToken:
+        process.env.LARAVEL_VOICE_TOOLS_TOKEN ||
+        process.env.LARAVEL_API_TOKEN ||
+        "",
     laravelTenantDatabase:
         process.env.LARAVEL_TENANT_DATABASE ||
         process.env.LARAVEL_DATABASE ||
@@ -61,6 +65,21 @@ const env = {
         process.env.LARAVEL_CALLBACK_TIMEOUT_MS,
         30000
     ),
+
+    openaiApiKey: process.env.OPENAI_API_KEY || "",
+    openaiRealtimeModel: process.env.OPENAI_REALTIME_MODEL || "gpt-realtime",
+    openaiRealtimeVoice: process.env.OPENAI_REALTIME_VOICE || "marin",
+    openaiRealtimeTranscriptionModel:
+        process.env.OPENAI_REALTIME_TRANSCRIPTION_MODEL || "gpt-4o-mini-transcribe",
+    trunkAiEnabled: toBoolean(process.env.TRUNK_AI_ENABLED, true),
+    trunkAiLanguage: process.env.TRUNK_AI_LANGUAGE || "es",
+    trunkAiRealtimeConnectTimeoutMs: toNumber(process.env.TRUNK_AI_REALTIME_CONNECT_TIMEOUT_MS, 10000),
+    trunkAiRealtimeToolTimeoutMs: toNumber(process.env.TRUNK_AI_REALTIME_TOOL_TIMEOUT_MS, 12000),
+    trunkAiInputSampleRate: toNumber(process.env.TRUNK_AI_INPUT_SAMPLE_RATE, 24000),
+    trunkAiOutputSampleRate: toNumber(process.env.TRUNK_AI_OUTPUT_SAMPLE_RATE, 24000),
+    trunkAiVadThreshold: toNumber(process.env.TRUNK_AI_VAD_THRESHOLD, 0.65),
+    trunkAiTurnSilenceMs: toNumber(process.env.TRUNK_AI_TURN_SILENCE_MS, 500),
+    trunkAiInterruptionDebounceMs: toNumber(process.env.TRUNK_AI_INTERRUPTION_DEBOUNCE_MS, 300),
 
     pbxAmiEnabled: toBoolean(process.env.PBX_AMI_ENABLED, false),
     pbxAmiHost: process.env.PBX_AMI_HOST || "127.0.0.1",

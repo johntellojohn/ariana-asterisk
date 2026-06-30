@@ -49,6 +49,16 @@ async function startMediaSessionByLinkedId(linkedid, options = {}) {
     const existing = mediaSessionsByLinkedId.get(targetLinkedid);
 
     if (existing && existing.status !== "closed") {
+        if (
+            options.owner &&
+            existing.owner &&
+            existing.owner !== options.owner
+        ) {
+            const error = new Error(`ARI media session already owned by ${existing.owner}`);
+            error.status = 409;
+            throw error;
+        }
+
         return snapshotMediaSession(existing);
     }
 
@@ -179,6 +189,17 @@ async function closeMediaSession(idOrLinkedid, reason = "closed") {
     mediaSessionsById.delete(session.id);
     mediaSessionsByLinkedId.delete(session.linkedid);
 
+    if (typeof session.onClose === "function") {
+        try {
+            session.onClose(snapshotMediaSession(session));
+        } catch (error) {
+            console.warn("[ari:media] close callback failed", {
+                linkedid: session.linkedid,
+                message: error.message,
+            });
+        }
+    }
+
     return snapshotMediaSession(session);
 }
 
@@ -252,6 +273,7 @@ function createMediaSession(linkedid, ariSession, options = {}) {
     return {
         id,
         linkedid,
+        owner: options.owner || "agent",
         channelId: ariSession.channelId,
         bridgeId: ariSession.bridgeId,
         status: "starting",
@@ -275,6 +297,12 @@ function createMediaSession(linkedid, ariSession, options = {}) {
         agentWs: null,
         activeAgentId: options.agentId || null,
         lastError: null,
+        onAsteriskPcm48: typeof options.onAsteriskPcm48 === "function"
+            ? options.onAsteriskPcm48
+            : null,
+        onClose: typeof options.onClose === "function"
+            ? options.onClose
+            : null,
         codecState: {
             downsampleRemainder: new Int16Array(0),
             ulawRemainder: Buffer.alloc(0),
@@ -403,12 +431,29 @@ function handleRtpPacket(session, packet) {
     session.rtpPacketsReceived += 1;
     session.updatedAt = new Date().toISOString();
 
+    const pcm48 = decodeUlawPayloadToPcm48(rtp.payload);
+
+    if (typeof session.onAsteriskPcm48 === "function") {
+        try {
+            session.onAsteriskPcm48(pcm48, {
+                linkedid: session.linkedid,
+                packet: rtp,
+            });
+        } catch (error) {
+            session.lastError = error.message;
+            console.warn("[ari:media] RTP audio callback failed", {
+                linkedid: session.linkedid,
+                message: error.message,
+            });
+        }
+    }
+
     if (!session.agentWs || session.agentWs.readyState !== 1) {
         return;
     }
 
     try {
-        session.agentWs.send(decodeUlawPayloadToPcm48(rtp.payload), { binary: true });
+        session.agentWs.send(pcm48, { binary: true });
         session.browserFramesSent += 1;
     } catch (error) {
         session.lastError = error.message;
@@ -442,6 +487,7 @@ function snapshotMediaSession(session) {
     return {
         id: session.id,
         linkedid: session.linkedid,
+        owner: session.owner,
         channelId: session.channelId,
         bridgeId: session.bridgeId,
         status: session.status,
@@ -465,6 +511,19 @@ function snapshotMediaSession(session) {
         format: env.ariExternalMediaFormat,
         lastError: session.lastError,
     };
+}
+
+function sendPcm48ToAsterisk(idOrLinkedid, pcm48Buffer) {
+    const key = String(idOrLinkedid || "").trim();
+    const session = mediaSessionsById.get(key) || mediaSessionsByLinkedId.get(key);
+
+    if (!session || session.status === "closed") {
+        return false;
+    }
+
+    sendAgentAudioToAsterisk(session, pcm48Buffer);
+
+    return true;
 }
 
 function publicWebSocketUrl(path) {
@@ -503,4 +562,5 @@ module.exports = {
     listMediaSessions,
     closeMediaSession,
     attachAgentWebSocket,
+    sendPcm48ToAsterisk,
 };

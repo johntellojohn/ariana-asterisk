@@ -1,5 +1,6 @@
 const ariService = require("./ari.service");
 const ariMediaService = require("./ari-media.service");
+const ariAiSessionService = require("./ari-ai-session.service");
 
 function health(req, res) {
     res.json({
@@ -30,6 +31,16 @@ function sessions(req, res) {
 
 function mediaSessions(req, res) {
     const items = ariMediaService.listMediaSessions();
+
+    res.json({
+        ok: true,
+        total: items.length,
+        data: items,
+    });
+}
+
+function aiSessions(req, res) {
+    const items = ariAiSessionService.listAiSessions();
 
     res.json({
         ok: true,
@@ -191,6 +202,7 @@ async function startCallMediaSession(req, res, next) {
         const session = await ariMediaService.startMediaSessionByLinkedId(
             req.params.linkedid,
             {
+                owner: "agent",
                 agentId: req.body.agent_id || req.body.agentId || null,
             }
         );
@@ -227,15 +239,57 @@ async function closeCallMediaSession(req, res, next) {
     }
 }
 
+async function startCallAiSession(req, res, next) {
+    try {
+        const session = await ariAiSessionService.startAiSessionByLinkedId(
+            req.params.linkedid,
+            req.body || {}
+        );
+
+        res.json({
+            ok: true,
+            data: session,
+        });
+    } catch (error) {
+        next(error);
+    }
+}
+
+async function closeCallAiSession(req, res, next) {
+    try {
+        const session = await ariAiSessionService.closeAiSession(
+            req.params.linkedid,
+            req.body.reason || "closed_by_api"
+        );
+
+        if (!session) {
+            return res.status(404).json({
+                ok: false,
+                message: "ARI AI session not found",
+            });
+        }
+
+        return res.json({
+            ok: true,
+            data: session,
+        });
+    } catch (error) {
+        next(error);
+    }
+}
+
 module.exports = {
     health,
     events,
     sessions,
     mediaSessions,
+    aiSessions,
     showSession,
     showCall,
     startCallMediaSession,
     closeCallMediaSession,
+    startCallAiSession,
+    closeCallAiSession,
     answerSession,
     answerCall,
     bridgeSession,

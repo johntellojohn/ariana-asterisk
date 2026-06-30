@@ -8,6 +8,7 @@ const server = app.listen(env.port, () => {
     console.log(`${env.appName} running on port ${env.port}`, {
         buildVersion: env.buildVersion,
         ariBridgeWaitMs: env.ariBridgeWaitMs,
+        trunkAiEnabled: env.trunkAiEnabled,
     });
 });
 

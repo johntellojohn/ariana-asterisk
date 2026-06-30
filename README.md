@@ -33,9 +33,12 @@ Para que EVA use audio en navegador con ARI, configura el JSON de la integracion
 - `GET /api/ari/events`
 - `GET /api/ari/sessions`
 - `GET /api/ari/media-sessions`
+- `GET /api/ari/ai-sessions`
 - `GET /api/ari/calls/:linkedid`
 - `POST /api/ari/calls/:linkedid/media-session`
 - `POST /api/ari/calls/:linkedid/media-session/close`
+- `POST /api/ari/calls/:linkedid/ai-session`
+- `POST /api/ari/calls/:linkedid/ai-session/close`
 - `POST /api/ari/calls/:linkedid/answer`
 - `POST /api/ari/calls/:linkedid/bridge`
 - `POST /api/ari/calls/:linkedid/play`
@@ -134,6 +137,25 @@ curl -X POST -H "Authorization: Bearer $ASTERISK_API_TOKEN" -H "Content-Type: ap
 ```
 
 La respuesta incluye `agentWebSocketUrl`. Ese WebSocket usa el mismo contrato de audio que EVA ya usa para llamadas humanas: PCM signed 16-bit little-endian a 48 kHz en ambos sentidos. Internamente Ariana convierte ese audio a RTP `ulaw` para Asterisk mediante ARI `ExternalMedia`.
+
+Para probar el modo IA troncal, EVA debe iniciar `POST /api/ari/calls/<linkedid>/ai-session` cuando el canal esta en `ai_agent_transfer`. Para una prueba manual:
+
+```bash
+curl -X POST -H "Authorization: Bearer $ASTERISK_API_TOKEN" -H "Content-Type: application/json" -d "{\"agent_id\":1,\"channel\":\"trunk\",\"tools_base_url\":\"https://sigcrm.pro/api/voice-agent/tools\",\"realtime\":{\"instructions\":\"Responde breve en espanol.\"}}" http://localhost:366/api/ari/calls/<linkedid>/ai-session
+curl -H "Authorization: Bearer $ASTERISK_API_TOKEN" http://localhost:366/api/ari/ai-sessions
+```
+
+Variables requeridas para IA:
+
+```bash
+TRUNK_AI_ENABLED=true
+OPENAI_API_KEY=sk-...
+OPENAI_REALTIME_MODEL=gpt-realtime
+OPENAI_REALTIME_VOICE=marin
+LARAVEL_VOICE_TOOLS_TOKEN=
+```
+
+`LARAVEL_VOICE_TOOLS_TOKEN` puede quedar vacio si EVA acepta `LARAVEL_API_TOKEN` para herramientas de voz; si tu instalacion mantiene un token separado para `VOICE_GATEWAY`, coloca ese token aqui. La sesion IA usa el puente RTP de ARI, no `ariana-voice`.
 
 ## Desarrollo
 
