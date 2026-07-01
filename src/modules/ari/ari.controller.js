@@ -240,17 +240,46 @@ async function closeCallMediaSession(req, res, next) {
 }
 
 async function startCallAiSession(req, res, next) {
+    console.log("[ari:ai] ai-session request received", {
+        linkedid: req.params.linkedid,
+        agentId: req.body?.agent_id || null,
+        tenant: req.body?.tenant || null,
+        channel: req.body?.channel || null,
+        model: req.body?.realtime?.model || null,
+        voice: req.body?.realtime?.voice || null,
+        language: req.body?.realtime?.language || null,
+        hasInstructions: Boolean(req.body?.realtime?.instructions),
+        instructionsLength: String(req.body?.realtime?.instructions || "").length,
+        hasInitialGreeting: Boolean(String(req.body?.initial_greeting || "").trim()),
+    });
+
     try {
         const session = await ariAiSessionService.startAiSessionByLinkedId(
             req.params.linkedid,
             req.body || {}
         );
 
+        console.log("[ari:ai] ai-session request completed", {
+            linkedid: req.params.linkedid,
+            sessionId: session.id,
+            mediaSessionId: session.mediaSessionId,
+            status: session.status,
+            realtimeReady: session.realtimeReady,
+            asteriskAudioReady: session.asteriskAudioReady,
+        });
+
         res.json({
             ok: true,
             data: session,
         });
     } catch (error) {
+        console.warn("[ari:ai] ai-session request failed", {
+            linkedid: req.params.linkedid,
+            agentId: req.body?.agent_id || null,
+            status: error.status || null,
+            message: error.message,
+        });
+
         next(error);
     }
 }

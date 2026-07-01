@@ -25,6 +25,13 @@ async function startAiSessionByLinkedId(linkedid, payload = {}) {
     const existing = aiSessionsByLinkedId.get(targetLinkedid);
 
     if (existing && !existing.closedAt) {
+        console.log("[ari:ai] existing ai-session reused", {
+            linkedid: targetLinkedid,
+            sessionId: existing.id,
+            status: existing.status,
+            mediaSessionId: existing.mediaSessionId,
+        });
+
         return snapshotAiSession(existing);
     }
 
@@ -32,8 +39,30 @@ async function startAiSessionByLinkedId(linkedid, payload = {}) {
     aiSessionsById.set(session.id, session);
     aiSessionsByLinkedId.set(targetLinkedid, session);
 
+    console.log("[ari:ai] starting realtime trunk session", {
+        linkedid: session.linkedid,
+        sessionId: session.id,
+        agentId: session.agentId,
+        tenant: session.tenant,
+        model: session.model,
+        voice: session.voice,
+        language: session.language,
+        hasInitialGreeting: Boolean(session.initialGreeting),
+    });
+
     try {
+        console.log("[ari:ai] connecting OpenAI realtime websocket", {
+            linkedid: session.linkedid,
+            sessionId: session.id,
+            model: session.model,
+        });
+
         await connectRealtime(session);
+
+        console.log("[ari:ai] OpenAI realtime websocket ready, starting ARI media", {
+            linkedid: session.linkedid,
+            sessionId: session.id,
+        });
 
         const mediaSession = await ariMediaService.startMediaSessionByLinkedId(
             targetLinkedid,
@@ -70,6 +99,13 @@ async function startAiSessionByLinkedId(linkedid, payload = {}) {
         session.lastError = error.message;
         session.status = "failed";
         session.updatedAt = new Date().toISOString();
+
+        console.warn("[ari:ai] realtime trunk session start failed", {
+            linkedid: session.linkedid,
+            sessionId: session.id,
+            message: error.message,
+            status: error.status || null,
+        });
 
         await closeAiSession(session.id, "start_failed").catch(() => {});
 
