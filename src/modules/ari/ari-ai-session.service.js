@@ -127,6 +127,11 @@ async function closeAiSession(idOrLinkedid, reason = "closed", options = {}) {
         session.closeReason = reason;
         session.updatedAt = session.closedAt;
 
+        if (session.humanTransferCloseTimer) {
+            clearTimeout(session.humanTransferCloseTimer);
+            session.humanTransferCloseTimer = null;
+        }
+
         if (session.realtimeSocket && session.realtimeSocket.readyState !== WebSocket.CLOSED) {
             session.realtimeSocket.close(1000, reason);
         }
@@ -198,6 +203,8 @@ function createAiSession(linkedid, payload = {}) {
         interruptionsIgnored: 0,
         toolCalls: 0,
         transcriptsSaved: 0,
+        pendingHumanTransfer: null,
+        humanTransferCloseTimer: null,
         lastError: null,
     };
 
@@ -285,10 +292,18 @@ async function connectRealtime(session) {
 }
 
 function sessionConfig(session) {
+    const configuredTools = tools();
+
+    console.log("[ari:ai] realtime session tools configured", {
+        linkedid: session.linkedid,
+        sessionId: session.id,
+        tools: configuredTools.map((tool) => tool.name),
+    });
+
     return {
         type: "realtime",
         model: session.model,
-        instructions: session.instructions,
+        instructions: [session.instructions, humanTransferInstructions()].filter(Boolean).join("\n\n"),
         output_modalities: ["audio"],
         audio: {
             input: {
@@ -317,10 +332,20 @@ function sessionConfig(session) {
                 voice: session.voice,
             },
         },
-        tools: tools(),
+        tools: configuredTools,
         tool_choice: "auto",
         parallel_tool_calls: false,
     };
+}
+
+function humanTransferInstructions() {
+    return [
+        "Regla de transferencia humana para llamadas troncales:",
+        "- Si el cliente pide hablar con una persona, humano, asesor, agente, soporte o recepcionista, debes llamar inmediatamente la herramienta transfer_to_human con trigger customer_request.",
+        "- Si no entiendes la solicitud despues de intentarlo brevemente, debes llamar transfer_to_human con trigger ai_confusion.",
+        "- Si el cliente esta molesto, frustrado o dice que no lo estas entendiendo, debes llamar transfer_to_human con trigger customer_frustrated.",
+        "- No digas que no puedes transferir. Usa la herramienta transfer_to_human y luego di exactamente el mensaje que devuelva la herramienta.",
+    ].join("\n");
 }
 
 function tools() {
@@ -380,6 +405,19 @@ function tools() {
             required: ["role", "text"],
             additionalProperties: true,
         }),
+        functionTool("transfer_to_human", "Transfiere esta llamada troncal a un agente humano en linea del departamento configurado. Usala cuando el cliente pida hablar con una persona, agente o asesor, cuando no puedas resolver, o cuando detectes molestia o frustracion.", {
+            type: "object",
+            properties: {
+                trigger: {
+                    type: "string",
+                    enum: ["customer_request", "ai_confusion", "customer_frustrated", "unresolved"],
+                },
+                reason: { type: "string" },
+                preferred_agent_id: { type: "integer" },
+            },
+            required: ["trigger", "reason"],
+            additionalProperties: false,
+        }),
     ];
 }
 
@@ -429,6 +467,7 @@ function handleRealtimeEvent(session, event) {
         case "response.output_audio.done":
         case "response.done":
             session.outputActive = false;
+            scheduleHumanTransferClose(session, event.type);
             break;
         case "response.function_call_arguments.done":
             handleFunctionCall(session, event).catch((error) => {
@@ -507,10 +546,20 @@ function isAiOutputActive(session) {
 }
 
 async function handleFunctionCall(session, event) {
+    const args = parseJsonObject(event.arguments);
+
+    console.log("[ari:ai] realtime tool call requested", {
+        linkedid: session.linkedid,
+        sessionId: session.id,
+        name: event.name,
+        callId: event.call_id,
+        args,
+    });
+
     const result = await callTool(
         event.name,
         toolContext(session, event.call_id),
-        parseJsonObject(event.arguments)
+        args
     ).catch((error) => ({
         ok: false,
         message: error.message,
@@ -519,6 +568,33 @@ async function handleFunctionCall(session, event) {
     }));
 
     session.toolCalls += 1;
+
+    console.log("[ari:ai] realtime tool call completed", {
+        linkedid: session.linkedid,
+        sessionId: session.id,
+        name: event.name,
+        ok: Boolean(result && result.ok),
+        status: result && (result.status || result.data?.status || null),
+        message: normalizeText(result && (result.message || result.data?.message || "")),
+        transferred: Boolean(result && result.data && result.data.transferred),
+    });
+
+    const humanTransfer = event.name === "transfer_to_human"
+        ? humanTransferResult(result)
+        : null;
+
+    if (humanTransfer && humanTransfer.transferred) {
+        session.pendingHumanTransfer = {
+            status: humanTransfer.status,
+            message: humanTransfer.message,
+            transferred: true,
+            closeScheduled: false,
+            requestedAt: new Date().toISOString(),
+        };
+    }
+    const shouldUseTransferInstructions = Boolean(
+        humanTransfer && humanTransfer.message && (humanTransfer.status || humanTransfer.transferred)
+    );
 
     sendRealtimeEvent(session, {
         type: "conversation.item.create",
@@ -533,8 +609,83 @@ async function handleFunctionCall(session, event) {
         type: "response.create",
         response: {
             output_modalities: ["audio"],
+            ...(shouldUseTransferInstructions
+                ? {
+                    instructions: `Di exactamente este mensaje, sin agregar frases, preguntas ni informacion adicional: "${humanTransfer.message}"`,
+                }
+                : {}),
         },
     });
+
+    if (humanTransfer && humanTransfer.transferred && !humanTransfer.message) {
+        scheduleHumanTransferClose(session, "transfer_tool_without_message");
+    }
+}
+
+function humanTransferResult(result) {
+    const data = result && typeof result === "object" && result.data && typeof result.data === "object"
+        ? result.data
+        : {};
+    const status = normalizeText(data.status || result?.status);
+    const message = normalizeText(data.message || result?.message);
+
+    return {
+        status,
+        message,
+        transferred: Boolean(data.transferred)
+            || status === "transferred"
+            || status === "already_transferred",
+    };
+}
+
+function scheduleHumanTransferClose(session, trigger = "response_done") {
+    const transferStatus = session.pendingHumanTransfer?.status || "";
+    const shouldClose = Boolean(
+        session.pendingHumanTransfer?.transferred
+            || transferStatus === "transferred"
+            || transferStatus === "already_transferred"
+    );
+
+    if (!shouldClose) {
+        return;
+    }
+
+    if (session.pendingHumanTransfer.closeScheduled || session.closedAt) {
+        return;
+    }
+
+    session.pendingHumanTransfer.closeScheduled = true;
+
+    const attemptClose = () => {
+        session.humanTransferCloseTimer = null;
+
+        if (session.closedAt) {
+            return;
+        }
+
+        if (isAiOutputActive(session)) {
+            session.humanTransferCloseTimer = setTimeout(attemptClose, 160);
+            return;
+        }
+
+        console.log("[ari:ai] closing ai session after human transfer message", {
+            linkedid: session.linkedid,
+            sessionId: session.id,
+            trigger,
+            transferStatus: session.pendingHumanTransfer?.status || null,
+        });
+
+        closeAiSession(session.id, "human_transfer_started").catch((error) => {
+            session.lastError = error.message;
+            console.warn("[ari:ai] failed closing ai session after human transfer", {
+                linkedid: session.linkedid,
+                sessionId: session.id,
+                message: error.message,
+            });
+        });
+    };
+
+    session.humanTransferCloseTimer = setTimeout(attemptClose, 220);
 }
 
 function handleInterruption(session, reason = "caller_interrupted") {

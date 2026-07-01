@@ -14,6 +14,7 @@ const TOOL_ENDPOINTS = {
     reschedule_appointment: "reschedule-appointment",
     cancel_appointment: "cancel-appointment",
     save_call_event: "save-call-event",
+    transfer_to_human: "transfer-to-human",
 };
 
 async function callTool(toolName, context = {}, args = {}, options = {}) {
