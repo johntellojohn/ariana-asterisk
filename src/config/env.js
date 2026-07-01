@@ -80,6 +80,9 @@ const env = {
     trunkAiVadThreshold: toNumber(process.env.TRUNK_AI_VAD_THRESHOLD, 0.65),
     trunkAiTurnSilenceMs: toNumber(process.env.TRUNK_AI_TURN_SILENCE_MS, 500),
     trunkAiInterruptionDebounceMs: toNumber(process.env.TRUNK_AI_INTERRUPTION_DEBOUNCE_MS, 300),
+    trunkAiInterruptionRmsThreshold: toNumber(process.env.TRUNK_AI_INTERRUPTION_RMS_THRESHOLD, 0.02),
+    trunkAiInterruptionMinSpeechMs: toNumber(process.env.TRUNK_AI_INTERRUPTION_MIN_SPEECH_MS, 250),
+    trunkAiInterruptionWindowMs: toNumber(process.env.TRUNK_AI_INTERRUPTION_WINDOW_MS, 700),
 
     pbxAmiEnabled: toBoolean(process.env.PBX_AMI_ENABLED, false),
     pbxAmiHost: process.env.PBX_AMI_HOST || "127.0.0.1",

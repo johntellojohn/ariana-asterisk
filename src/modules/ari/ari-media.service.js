@@ -565,6 +565,39 @@ function sendPcm48ToAsterisk(idOrLinkedid, pcm48Buffer) {
     return true;
 }
 
+function clearAsteriskAudioQueue(idOrLinkedid, reason = "cleared") {
+    const key = String(idOrLinkedid || "").trim();
+    const session = mediaSessionsById.get(key) || mediaSessionsByLinkedId.get(key);
+
+    if (!session || session.status === "closed") {
+        return 0;
+    }
+
+    const cleared = session.rtpSendQueue ? session.rtpSendQueue.length : 0;
+
+    if (session.rtpSendTimer) {
+        clearInterval(session.rtpSendTimer);
+        session.rtpSendTimer = null;
+    }
+
+    session.rtpSendQueue = [];
+    session.codecState = {
+        downsampleRemainder: new Int16Array(0),
+        ulawRemainder: Buffer.alloc(0),
+    };
+    session.updatedAt = new Date().toISOString();
+
+    if (cleared > 0) {
+        console.log("[ari:media] RTP output queue cleared", {
+            linkedid: session.linkedid,
+            reason,
+            cleared,
+        });
+    }
+
+    return cleared;
+}
+
 function publicWebSocketUrl(path) {
     const base = String(env.publicBaseUrl || "").trim().replace(/\/$/, "");
 
@@ -602,4 +635,5 @@ module.exports = {
     closeMediaSession,
     attachAgentWebSocket,
     sendPcm48ToAsterisk,
+    clearAsteriskAudioQueue,
 };

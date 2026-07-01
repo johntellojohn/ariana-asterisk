@@ -4,6 +4,7 @@ const WebSocket = require("ws");
 const env = require("../../config/env");
 const ariMediaService = require("./ari-media.service");
 const { resamplePcm16 } = require("./pcm-utils");
+const { SpeechInterruptionGate } = require("./speech-interruption-gate");
 const { callTool } = require("../laravel/voice-agent-tools.service");
 
 const ASTERISK_PCM_RATE = 48000;
@@ -158,7 +159,7 @@ function createAiSession(linkedid, payload = {}) {
     const now = new Date().toISOString();
     const realtime = payload.realtime || {};
 
-    return {
+    const session = {
         id: crypto.randomUUID(),
         linkedid,
         status: "created",
@@ -188,10 +189,36 @@ function createAiSession(linkedid, payload = {}) {
         inputFramesSent: 0,
         outputFramesSent: 0,
         lastOutputAudioAt: 0,
+        inputSpeechFrames: [],
+        lastInputLevel: 0,
+        interruptionInputChunks: [],
+        interruptionSpeechActive: false,
+        interruptionStartedAt: null,
+        interruptionsConfirmed: 0,
+        interruptionsIgnored: 0,
         toolCalls: 0,
         transcriptsSaved: 0,
         lastError: null,
     };
+
+    session.interruptionGate = new SpeechInterruptionGate({
+        debounceMs: Math.max(0, env.trunkAiInterruptionDebounceMs),
+        onInterrupt: (reason) => handleInterruption(session, reason),
+        onIgnored: (reason) => {
+            session.interruptionsIgnored += 1;
+            console.log("[ari:ai] ai interruption ignored", {
+                linkedid: session.linkedid,
+                reason,
+                speechMs: Math.round(confirmedSpeechMs(session)),
+                minSpeechMs: env.trunkAiInterruptionMinSpeechMs,
+                lastLevel: Number(session.lastInputLevel.toFixed(5)),
+                rmsThreshold: env.trunkAiInterruptionRmsThreshold,
+            });
+        },
+        shouldInterrupt: () => hasConfirmedInputSpeech(session),
+    });
+
+    return session;
 }
 
 async function connectRealtime(session) {
@@ -362,6 +389,7 @@ function handleAsteriskAudio(session, pcm48) {
     }
 
     session.asteriskAudioReady = true;
+    const speechFrame = trackInputSpeech(session, pcm48);
 
     if (session.initialGreetingPending && !session.initialGreetingRequested) {
         requestInitialGreeting(session);
@@ -369,26 +397,17 @@ function handleAsteriskAudio(session, pcm48) {
     }
 
     if (isAiOutputActive(session)) {
+        bufferInterruptionAudio(session, pcm48);
+        evaluateInterruptionCandidate(session, speechFrame);
         return;
     }
 
-    const pcmInput = resamplePcm16(
-        pcm48,
-        ASTERISK_PCM_RATE,
-        env.trunkAiInputSampleRate
-    );
+    session.interruptionGate.cancelPending();
+    session.interruptionSpeechActive = false;
+    session.interruptionStartedAt = null;
+    session.interruptionInputChunks = [];
 
-    if (!pcmInput.length) {
-        return;
-    }
-
-    sendRealtimeEvent(session, {
-        type: "input_audio_buffer.append",
-        audio: pcmInput.toString("base64"),
-    });
-
-    session.inputFramesSent += 1;
-    session.updatedAt = new Date().toISOString();
+    appendInputAudioToRealtime(session, pcm48);
 }
 
 function handleRealtimeEvent(session, event) {
@@ -429,7 +448,12 @@ function handleRealtimeEvent(session, event) {
             saveTranscript(session, "assistant", event.transcript, event).catch(() => {});
             break;
         case "input_audio_buffer.speech_started":
-            handleInterruption(session);
+            if (isAiOutputActive(session)) {
+                session.interruptionGate.speechStarted("openai_speech_started");
+            }
+            break;
+        case "input_audio_buffer.speech_stopped":
+            session.interruptionGate.speechStopped("openai_speech_stopped");
             break;
         case "error":
             session.lastError = event.error?.message || JSON.stringify(event.error || event);
@@ -470,6 +494,12 @@ function isAiOutputActive(session) {
         return true;
     }
 
+    const mediaSession = ariMediaService.getMediaSession(session.mediaSessionId || session.linkedid);
+
+    if (mediaSession && mediaSession.rtpSendQueueLength > 0) {
+        return true;
+    }
+
     const debounceMs = Math.max(0, env.trunkAiInterruptionDebounceMs);
 
     return session.lastOutputAudioAt > 0
@@ -507,16 +537,24 @@ async function handleFunctionCall(session, event) {
     });
 }
 
-function handleInterruption(session) {
-    if (!session.outputActive || !session.currentResponseId) {
+function handleInterruption(session, reason = "caller_interrupted") {
+    const mediaSession = ariMediaService.getMediaSession(session.mediaSessionId || session.linkedid);
+    const hasQueuedAudio = Boolean(mediaSession && mediaSession.rtpSendQueueLength > 0);
+    const hasActiveResponse = Boolean(session.outputActive && session.currentResponseId);
+
+    if (!hasActiveResponse && !hasQueuedAudio) {
         return;
     }
 
-    sendRealtimeEvent(session, {
-        type: "response.cancel",
-    });
+    const clearedFrames = ariMediaService.clearAsteriskAudioQueue(session.linkedid, reason);
 
-    if (session.currentAssistantItemId) {
+    if (hasActiveResponse) {
+        sendRealtimeEvent(session, {
+            type: "response.cancel",
+        });
+    }
+
+    if (hasActiveResponse && session.currentAssistantItemId) {
         sendRealtimeEvent(session, {
             type: "conversation.item.truncate",
             item_id: session.currentAssistantItemId,
@@ -526,6 +564,172 @@ function handleInterruption(session) {
     }
 
     session.outputActive = false;
+    session.interruptionGate.cancelPending();
+    session.interruptionSpeechActive = false;
+    session.interruptionsConfirmed += 1;
+
+    const forwardedFrames = flushBufferedInterruptionAudio(session);
+    session.interruptionStartedAt = null;
+
+    console.log("[ari:ai] ai interruption confirmed", {
+        linkedid: session.linkedid,
+        reason,
+        responseId: session.currentResponseId,
+        assistantItemId: session.currentAssistantItemId,
+        clearedFrames,
+        forwardedFrames,
+    });
+}
+
+function appendInputAudioToRealtime(session, pcm48) {
+    const pcmInput = resamplePcm16(
+        pcm48,
+        ASTERISK_PCM_RATE,
+        env.trunkAiInputSampleRate
+    );
+
+    if (!pcmInput.length) {
+        return false;
+    }
+
+    sendRealtimeEvent(session, {
+        type: "input_audio_buffer.append",
+        audio: pcmInput.toString("base64"),
+    });
+
+    session.inputFramesSent += 1;
+    session.updatedAt = new Date().toISOString();
+
+    return true;
+}
+
+function trackInputSpeech(session, pcm48) {
+    const now = Date.now();
+    const durationMs = (pcm48.length / 2 / ASTERISK_PCM_RATE) * 1000;
+    const level = calculatePcm16Rms(pcm48);
+    const hasSpeech = level >= env.trunkAiInterruptionRmsThreshold;
+    const frame = {
+        at: now,
+        durationMs,
+        hasSpeech,
+    };
+
+    session.lastInputLevel = level;
+    session.inputSpeechFrames.push(frame);
+    pruneInputSpeechFrames(session, now);
+
+    return frame;
+}
+
+function pruneInputSpeechFrames(session, now = Date.now()) {
+    const windowMs = Math.max(1, env.trunkAiInterruptionWindowMs);
+    session.inputSpeechFrames = session.inputSpeechFrames.filter(
+        (frame) => frame.at >= now - windowMs
+    );
+}
+
+function confirmedSpeechMs(session) {
+    const now = Date.now();
+    pruneInputSpeechFrames(session, now);
+
+    return session.inputSpeechFrames
+        .filter((frame) => frame.hasSpeech)
+        .reduce((total, frame) => total + frame.durationMs, 0);
+}
+
+function hasConfirmedInputSpeech(session) {
+    return confirmedSpeechMs(session) >= env.trunkAiInterruptionMinSpeechMs;
+}
+
+function evaluateInterruptionCandidate(session, speechFrame) {
+    if (speechFrame.hasSpeech) {
+        if (!session.interruptionSpeechActive) {
+            session.interruptionSpeechActive = true;
+            session.interruptionStartedAt = speechFrame.at;
+
+            console.log("[ari:ai] ai interruption candidate", {
+                linkedid: session.linkedid,
+                level: Number(session.lastInputLevel.toFixed(5)),
+                rmsThreshold: env.trunkAiInterruptionRmsThreshold,
+                debounceMs: env.trunkAiInterruptionDebounceMs,
+            });
+
+            session.interruptionGate.speechStarted("caller_speech_over_ai");
+        }
+
+        return;
+    }
+
+    if (
+        session.interruptionSpeechActive &&
+        !hasRecentInputSpeech(session, Math.max(env.ariExternalMediaFrameMs * 3, 80))
+    ) {
+        session.interruptionSpeechActive = false;
+        session.interruptionStartedAt = null;
+        session.interruptionGate.speechStopped("speech_stopped_before_debounce");
+    }
+}
+
+function hasRecentInputSpeech(session, lookbackMs) {
+    const now = Date.now();
+
+    return session.inputSpeechFrames.some(
+        (frame) => frame.hasSpeech && frame.at >= now - lookbackMs
+    );
+}
+
+function bufferInterruptionAudio(session, pcm48) {
+    const now = Date.now();
+    const maxBufferMs = Math.max(
+        env.trunkAiInterruptionWindowMs + 300,
+        env.trunkAiInterruptionMinSpeechMs + env.trunkAiInterruptionDebounceMs + 300
+    );
+
+    session.interruptionInputChunks.push({
+        at: now,
+        pcm48: Buffer.from(pcm48),
+    });
+
+    session.interruptionInputChunks = session.interruptionInputChunks.filter(
+        (chunk) => chunk.at >= now - maxBufferMs
+    );
+}
+
+function flushBufferedInterruptionAudio(session) {
+    const startedAt = session.interruptionStartedAt || Date.now();
+    const includeAfter = startedAt - 300;
+    const chunks = session.interruptionInputChunks.filter(
+        (chunk) => chunk.at >= includeAfter
+    );
+
+    session.interruptionInputChunks = [];
+
+    let forwardedFrames = 0;
+
+    chunks.forEach((chunk) => {
+        if (appendInputAudioToRealtime(session, chunk.pcm48)) {
+            forwardedFrames += 1;
+        }
+    });
+
+    return forwardedFrames;
+}
+
+function calculatePcm16Rms(buffer) {
+    const samples = Math.floor(buffer.length / 2);
+
+    if (samples <= 0) {
+        return 0;
+    }
+
+    let sumSquares = 0;
+
+    for (let offset = 0; offset + 1 < buffer.length; offset += 2) {
+        const sample = buffer.readInt16LE(offset) / 32768;
+        sumSquares += sample * sample;
+    }
+
+    return Math.sqrt(sumSquares / samples);
 }
 
 function requestInitialGreeting(session) {
@@ -604,6 +808,8 @@ function snapshotAiSession(session) {
         asteriskAudioReady: session.asteriskAudioReady,
         inputFramesSent: session.inputFramesSent,
         outputFramesSent: session.outputFramesSent,
+        interruptionsConfirmed: session.interruptionsConfirmed,
+        interruptionsIgnored: session.interruptionsIgnored,
         toolCalls: session.toolCalls,
         transcriptsSaved: session.transcriptsSaved,
         initialGreetingConfigured: Boolean(session.initialGreeting),
