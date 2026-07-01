@@ -174,6 +174,13 @@ async function closeMediaSession(idOrLinkedid, reason = "closed") {
         session.rtpSocket = null;
     }
 
+    if (session.rtpSendTimer) {
+        clearInterval(session.rtpSendTimer);
+        session.rtpSendTimer = null;
+    }
+
+    session.rtpSendQueue = [];
+
     if (session.externalChannelId) {
         await ariService.ariRequest("delete", `/channels/${encodeURIComponent(session.externalChannelId)}`)
             .catch((error) => {
@@ -312,6 +319,8 @@ function createMediaSession(linkedid, ariSession, options = {}) {
             timestamp: crypto.randomInt(0, 0xffffffff),
             ssrc: crypto.randomInt(1, 0xffffffff),
         },
+        rtpSendQueue: [],
+        rtpSendTimer: null,
     };
 }
 
@@ -468,18 +477,47 @@ function sendAgentAudioToAsterisk(session, pcm48Buffer) {
     const frameSamples = Math.max(1, Math.round(8000 * env.ariExternalMediaFrameMs / 1000));
     const payloads = pcm48BufferToUlawPayloads(pcm48Buffer, session.codecState, frameSamples);
 
-    for (const payload of payloads) {
+    if (payloads.length > 0) {
+        session.rtpSendQueue.push(...payloads);
+        session.agentFramesReceived += 1;
+        session.updatedAt = new Date().toISOString();
+        startRtpSendTimer(session);
+    }
+}
+
+function startRtpSendTimer(session) {
+    if (session.rtpSendTimer) {
+        return;
+    }
+
+    const intervalMs = Math.max(1, env.ariExternalMediaFrameMs);
+
+    session.rtpSendTimer = setInterval(() => {
+        if (session.status === "closed" || !session.rtpSocket || !session.remoteRtp) {
+            clearInterval(session.rtpSendTimer);
+            session.rtpSendTimer = null;
+            return;
+        }
+
+        const payload = session.rtpSendQueue.shift();
+
+        if (!payload) {
+            clearInterval(session.rtpSendTimer);
+            session.rtpSendTimer = null;
+            return;
+        }
+
         const packet = buildRtpPacket(payload, session.rtpSendState, {
             payloadType: env.ariExternalMediaPayloadType,
         });
 
         session.rtpSocket.send(packet, session.remoteRtp.port, session.remoteRtp.address);
         session.rtpPacketsSent += 1;
-    }
-
-    if (payloads.length > 0) {
-        session.agentFramesReceived += 1;
         session.updatedAt = new Date().toISOString();
+    }, intervalMs);
+
+    if (typeof session.rtpSendTimer.unref === "function") {
+        session.rtpSendTimer.unref();
     }
 }
 
@@ -502,6 +540,7 @@ function snapshotMediaSession(session) {
         remoteRtp: session.remoteRtp ? { ...session.remoteRtp } : null,
         rtpPacketsReceived: session.rtpPacketsReceived,
         rtpPacketsSent: session.rtpPacketsSent,
+        rtpSendQueueLength: session.rtpSendQueue ? session.rtpSendQueue.length : 0,
         agentFramesReceived: session.agentFramesReceived,
         browserFramesSent: session.browserFramesSent,
         activeAgentId: session.activeAgentId,

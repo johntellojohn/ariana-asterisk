@@ -187,6 +187,7 @@ function createAiSession(linkedid, payload = {}) {
         currentAssistantItemId: null,
         inputFramesSent: 0,
         outputFramesSent: 0,
+        lastOutputAudioAt: 0,
         toolCalls: 0,
         transcriptsSaved: 0,
         lastError: null,
@@ -367,6 +368,10 @@ function handleAsteriskAudio(session, pcm48) {
         return;
     }
 
+    if (isAiOutputActive(session)) {
+        return;
+    }
+
     const pcmInput = resamplePcm16(
         pcm48,
         ASTERISK_PCM_RATE,
@@ -446,6 +451,7 @@ function playRealtimeAudio(session, event) {
     }
 
     session.currentAssistantItemId = event.item_id || session.currentAssistantItemId;
+    session.lastOutputAudioAt = Date.now();
 
     const pcmOutput = resamplePcm16(
         Buffer.from(delta, "base64"),
@@ -457,6 +463,17 @@ function playRealtimeAudio(session, event) {
         session.outputFramesSent += 1;
         session.updatedAt = new Date().toISOString();
     }
+}
+
+function isAiOutputActive(session) {
+    if (session.outputActive) {
+        return true;
+    }
+
+    const debounceMs = Math.max(0, env.trunkAiInterruptionDebounceMs);
+
+    return session.lastOutputAudioAt > 0
+        && Date.now() - session.lastOutputAudioAt < debounceMs;
 }
 
 async function handleFunctionCall(session, event) {
