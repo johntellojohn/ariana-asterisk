@@ -4,6 +4,7 @@ const dgram = require("dgram");
 const env = require("../../config/env");
 const ariService = require("./ari.service");
 const pbxService = require("../pbx/pbx.service");
+const { CallRecording } = require("../calls/call-recording");
 const {
     parseRtpPacket,
     buildRtpPacket,
@@ -193,6 +194,18 @@ async function closeMediaSession(idOrLinkedid, reason = "closed") {
             });
     }
 
+    if (session.recording) {
+        const recording = session.recording;
+        session.recording = null;
+
+        await recording.finalize(reason).catch((error) => {
+            console.warn("[ari:media] recording finalize failed", {
+                linkedid: session.linkedid,
+                message: error.message,
+            });
+        });
+    }
+
     mediaSessionsById.delete(session.id);
     mediaSessionsByLinkedId.delete(session.linkedid);
 
@@ -321,6 +334,20 @@ function createMediaSession(linkedid, ariSession, options = {}) {
         },
         rtpSendQueue: [],
         rtpSendTimer: null,
+        recording: new CallRecording({
+            sessionId: id,
+            callId: linkedid,
+            linkedid,
+            tenant: options.tenant || null,
+            agentId: options.agentId || null,
+            mode: options.owner === "ai" ? "trunk_ai" : "trunk_human",
+            logger: (message, data) => {
+                console.warn(`[ari:media] ${message}`, {
+                    linkedid,
+                    ...data,
+                });
+            },
+        }),
     };
 }
 
@@ -442,6 +469,13 @@ function handleRtpPacket(session, packet) {
 
     const pcm48 = decodeUlawPayloadToPcm48(rtp.payload);
 
+    if (session.recording) {
+        session.recording.recordCustomerPcm(pcm48, {
+            sampleRate: 48000,
+            channelCount: 1,
+        });
+    }
+
     if (typeof session.onAsteriskPcm48 === "function") {
         try {
             session.onAsteriskPcm48(pcm48, {
@@ -472,6 +506,13 @@ function handleRtpPacket(session, packet) {
 function sendAgentAudioToAsterisk(session, pcm48Buffer) {
     if (!session.rtpSocket || !session.remoteRtp) {
         return;
+    }
+
+    if (session.recording) {
+        session.recording.recordAgentPcm(pcm48Buffer, {
+            sampleRate: 48000,
+            channelCount: 1,
+        });
     }
 
     const frameSamples = Math.max(1, Math.round(8000 * env.ariExternalMediaFrameMs / 1000));

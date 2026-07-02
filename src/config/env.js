@@ -30,6 +30,8 @@ const laravelTrunkEventsPath =
     process.env.PBX_LARAVEL_EVENTS_PATH ||
     "/api/trunk-calls/events";
 
+const path = require("path");
+
 const env = {
     nodeEnv: process.env.NODE_ENV || "development",
     port: toNumber(process.env.PORT, 3002),
@@ -67,6 +69,7 @@ const env = {
     ),
 
     openaiApiKey: process.env.OPENAI_API_KEY || "",
+    openaiSttModel: process.env.OPENAI_STT_MODEL || "gpt-4o-mini-transcribe",
     openaiRealtimeModel: process.env.OPENAI_REALTIME_MODEL || "gpt-realtime",
     openaiRealtimeVoice: process.env.OPENAI_REALTIME_VOICE || "marin",
     openaiRealtimeTranscriptionModel:
@@ -83,6 +86,16 @@ const env = {
     trunkAiInterruptionRmsThreshold: toNumber(process.env.TRUNK_AI_INTERRUPTION_RMS_THRESHOLD, 0.02),
     trunkAiInterruptionMinSpeechMs: toNumber(process.env.TRUNK_AI_INTERRUPTION_MIN_SPEECH_MS, 250),
     trunkAiInterruptionWindowMs: toNumber(process.env.TRUNK_AI_INTERRUPTION_WINDOW_MS, 700),
+    callAudioLanguage: process.env.CALL_AUDIO_LANGUAGE || "es",
+    callRecordingEnabled: toBoolean(process.env.CALL_RECORDING_ENABLED, true),
+    callRecordingTranscribe: toBoolean(process.env.CALL_RECORDING_TRANSCRIBE, true),
+    callCallbackTimeoutMs: toNumber(process.env.CALL_CALLBACK_TIMEOUT_MS, 30000),
+    maxAudioUploadMb: toNumber(process.env.MAX_AUDIO_UPLOAD_MB, 25),
+    tmpDir: process.env.TMP_DIR || path.join(process.cwd(), "tmp"),
+    audioUploadDir:
+        process.env.AUDIO_UPLOAD_DIR || path.join(process.cwd(), "tmp", "uploads"),
+    recordingOutputDir:
+        process.env.RECORDING_OUTPUT_DIR || path.join(process.cwd(), "tmp", "recordings"),
 
     pbxAmiEnabled: toBoolean(process.env.PBX_AMI_ENABLED, false),
     pbxAmiHost: process.env.PBX_AMI_HOST || "127.0.0.1",
