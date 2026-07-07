@@ -5,6 +5,7 @@ const path = require("path");
 const env = require("../../config/env");
 const sttService = require("../stt/stt.service");
 const laravelService = require("../laravel/laravel.service");
+const { analyzeRecording } = require("./call-analysis");
 const { createWavBuffer } = require("./wav.util");
 
 const SAMPLE_RATE = 48000;
@@ -208,6 +209,12 @@ class CallRecording {
 
         const transcriptSegments = await this.resolveTranscriptSegments(customerPcm, agentPcm);
         const durationSeconds = Math.round(maxSamples / SAMPLE_RATE);
+        const transcript = transcriptSegments.map((segment) => `${segment.speaker}: ${segment.text}`).join("\n");
+        const analysis = await analyzeRecording({
+            durationSeconds,
+            transcriptSegments,
+            transcript,
+        });
 
         await this.cleanupRawFiles();
 
@@ -222,7 +229,8 @@ class CallRecording {
             endedAt: this.closedAt.toISOString(),
             reason,
             transcriptSegments,
-            transcript: transcriptSegments.map((segment) => `${segment.speaker}: ${segment.text}`).join("\n"),
+            transcript,
+            analysis,
             metadata: {
                 mode: this.mode,
                 sample_rate: SAMPLE_RATE,
@@ -232,6 +240,7 @@ class CallRecording {
                 playback_mix: "mono_centered",
                 customer_frames: this.sources.customer.frames,
                 agent_frames: this.sources.agent.frames,
+                analysis,
             },
         };
     }
@@ -349,6 +358,7 @@ class CallRecording {
                 ended_at: result.endedAt,
                 transcript: result.transcript,
                 transcript_segments: result.transcriptSegments,
+                analysis: result.analysis,
                 metadata: result.metadata,
             },
         });

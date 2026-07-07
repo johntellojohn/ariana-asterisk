@@ -70,6 +70,7 @@ const env = {
 
     openaiApiKey: process.env.OPENAI_API_KEY || "",
     openaiSttModel: process.env.OPENAI_STT_MODEL || "gpt-4o-mini-transcribe",
+    openaiAnalysisModel: process.env.OPENAI_ANALYSIS_MODEL || "gpt-4o-mini",
     openaiRealtimeModel: process.env.OPENAI_REALTIME_MODEL || "gpt-realtime",
     openaiRealtimeVoice: process.env.OPENAI_REALTIME_VOICE || "marin",
     openaiRealtimeTranscriptionModel:
@@ -89,6 +90,7 @@ const env = {
     callAudioLanguage: process.env.CALL_AUDIO_LANGUAGE || "es",
     callRecordingEnabled: toBoolean(process.env.CALL_RECORDING_ENABLED, true),
     callRecordingTranscribe: toBoolean(process.env.CALL_RECORDING_TRANSCRIBE, true),
+    callRecordingAnalyze: toBoolean(process.env.CALL_RECORDING_ANALYZE, true),
     callCallbackTimeoutMs: toNumber(process.env.CALL_CALLBACK_TIMEOUT_MS, 30000),
     maxAudioUploadMb: toNumber(process.env.MAX_AUDIO_UPLOAD_MB, 25),
     tmpDir: process.env.TMP_DIR || path.join(process.cwd(), "tmp"),
