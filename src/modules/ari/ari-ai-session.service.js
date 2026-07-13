@@ -178,6 +178,7 @@ function createAiSession(linkedid, payload = {}) {
         tenant: payload.tenant || null,
         callbackUrl: payload.callback_url || payload.callbackUrl || null,
         toolsBaseUrl: payload.tools_base_url || payload.toolsBaseUrl || null,
+        dynamicTools: normalizeDynamicTools(payload.dynamic_tools || payload.dynamicTools),
         model: realtime.model || payload.model || env.openaiRealtimeModel,
         voice: realtime.voice || payload.voice || env.openaiRealtimeVoice,
         language: realtime.language || payload.language || env.trunkAiLanguage,
@@ -293,7 +294,7 @@ async function connectRealtime(session) {
 }
 
 function sessionConfig(session) {
-    const configuredTools = tools();
+    const configuredTools = tools(session);
 
     console.log("[ari:ai] realtime session tools configured", {
         linkedid: session.linkedid,
@@ -304,7 +305,11 @@ function sessionConfig(session) {
     return {
         type: "realtime",
         model: session.model,
-        instructions: [session.instructions, humanTransferInstructions()].filter(Boolean).join("\n\n"),
+        instructions: [
+            session.instructions,
+            dynamicToolsInstructions(session),
+            humanTransferInstructions(),
+        ].filter(Boolean).join("\n\n"),
         output_modalities: ["audio"],
         audio: {
             input: {
@@ -349,8 +354,8 @@ function humanTransferInstructions() {
     ].join("\n");
 }
 
-function tools() {
-    return [
+function tools(session = {}) {
+    const baseTools = [
         functionTool("get_agent_context", "Obtiene contexto vigente de agente, llamada y configuracion.", {
             type: "object",
             properties: {},
@@ -420,6 +425,33 @@ function tools() {
             additionalProperties: false,
         }),
     ];
+    const existingNames = new Set(baseTools.map((tool) => tool.name));
+    const dynamicTools = Array.isArray(session.dynamicTools)
+        ? session.dynamicTools.filter((tool) => !existingNames.has(tool.name))
+        : [];
+
+    return [...baseTools, ...dynamicTools];
+}
+
+function dynamicToolsInstructions(session = {}) {
+    const baseNames = new Set(tools({ dynamicTools: [] }).map((tool) => tool.name));
+    const names = Array.isArray(session.dynamicTools)
+        ? session.dynamicTools
+            .map((tool) => tool.name)
+            .filter((name) => name && !baseNames.has(name))
+        : [];
+
+    if (!names.length) {
+        return "";
+    }
+
+    return [
+        "Herramientas dinamicas del agente configuradas en EVA:",
+        `- Tienes disponibles estas tools adicionales: ${names.join(", ")}.`,
+        "- Usalas solo cuando la intencion del cliente coincida con la descripcion de la tool.",
+        "- Si falta un campo requerido, pide solo ese dato y luego ejecuta la tool.",
+        "- No digas que no tienes esa capacidad cuando exista una tool dinamica adecuada.",
+    ].join("\n");
 }
 
 function handleAsteriskAudio(session, pcm48) {
@@ -1003,6 +1035,47 @@ function functionTool(name, description, parameters) {
     };
 }
 
+function normalizeDynamicTools(value) {
+    if (!Array.isArray(value)) {
+        return [];
+    }
+
+    return value
+        .map((tool) => {
+            const source = tool && tool.function && typeof tool.function === "object"
+                ? tool.function
+                : tool;
+            const name = String((source && source.name) || "").trim();
+
+            if (!isValidToolName(name)) {
+                return null;
+            }
+
+            return functionTool(
+                name,
+                String((source && source.description) || name),
+                normalizeToolParameters(source && source.parameters)
+            );
+        })
+        .filter(Boolean);
+}
+
+function normalizeToolParameters(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+        return {
+            type: "object",
+            properties: {},
+            additionalProperties: true,
+        };
+    }
+
+    return value;
+}
+
+function isValidToolName(name) {
+    return /^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/.test(name);
+}
+
 function normalizeText(value) {
     if (typeof value !== "string") {
         return "";
@@ -1114,4 +1187,9 @@ module.exports = {
     closeAiSession,
     getAiSession,
     listAiSessions,
+    __test: {
+        createAiSession,
+        dynamicToolsInstructions,
+        tools,
+    },
 };

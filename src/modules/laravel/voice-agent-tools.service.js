@@ -28,10 +28,12 @@ async function callTool(toolName, context = {}, args = {}, options = {}) {
         throw error;
     }
 
-    const endpoint = TOOL_ENDPOINTS[toolName] || kebabCase(toolName);
+    const isConfiguredEndpoint = Object.prototype.hasOwnProperty.call(TOOL_ENDPOINTS, toolName);
+    const endpoint = isConfiguredEndpoint ? TOOL_ENDPOINTS[toolName] : "run";
     const response = await axios.post(
         `${toolsBaseUrl}/${endpoint}`,
         {
+            tool_name: isConfiguredEndpoint ? null : toolName,
             channel: context.channel || "trunk",
             call_id: context.call_id || context.callId || null,
             session_id: context.session_id || context.sessionId || null,
@@ -53,14 +55,6 @@ async function callTool(toolName, context = {}, args = {}, options = {}) {
     );
 
     return response.data;
-}
-
-function kebabCase(value) {
-    return String(value || "")
-        .trim()
-        .replace(/_/g, "-")
-        .replace(/([a-z0-9])([A-Z])/g, "$1-$2")
-        .toLowerCase();
 }
 
 module.exports = {
