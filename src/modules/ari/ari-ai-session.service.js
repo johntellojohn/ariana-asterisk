@@ -187,6 +187,11 @@ async function closeAiSession(idOrLinkedid, reason = "closed", options = {}) {
             session.humanTransferCloseTimer = null;
         }
 
+        if (session.conversationEndCloseTimer) {
+            clearTimeout(session.conversationEndCloseTimer);
+            session.conversationEndCloseTimer = null;
+        }
+
         if (session.realtimeSocket && session.realtimeSocket.readyState !== WebSocket.CLOSED) {
             session.realtimeSocket.close(1000, reason);
         }
@@ -262,6 +267,12 @@ function createAiSession(linkedid, payload = {}) {
         transcriptsSaved: 0,
         pendingHumanTransfer: null,
         humanTransferCloseTimer: null,
+        conversationEndCloseTimer: null,
+        conversationEndCloseScheduled: false,
+        conversationEndCloseRequested: false,
+        conversationEndCloseRequestedAt: 0,
+        conversationEndCloseResponseStarted: false,
+        conversationEndCloseResponseDone: false,
         lastError: null,
     };
 
@@ -549,6 +560,10 @@ function handleRealtimeEvent(session, event) {
         case "response.created":
             session.currentResponseId = event.response?.id || null;
             session.outputActive = true;
+            if (session.conversationEndCloseRequested) {
+                session.conversationEndCloseResponseStarted = true;
+                session.conversationEndCloseResponseDone = false;
+            }
             break;
         case "response.output_audio.delta":
             playRealtimeAudio(session, event);
@@ -557,6 +572,10 @@ function handleRealtimeEvent(session, event) {
         case "response.done":
             session.outputActive = false;
             scheduleHumanTransferClose(session, event.type);
+            if (session.conversationEndCloseRequested && session.conversationEndCloseResponseStarted) {
+                session.conversationEndCloseResponseDone = true;
+                scheduleConversationEndClose(session, event.type);
+            }
             break;
         case "response.function_call_arguments.done":
             handleFunctionCall(session, event).catch((error) => {
@@ -684,6 +703,7 @@ async function handleFunctionCall(session, event) {
     const shouldUseTransferInstructions = Boolean(
         humanTransfer && humanTransfer.message && (humanTransfer.status || humanTransfer.transferred)
     );
+    const shouldCloseAfterConversationEnd = isConversationEndToolCall(event, args, result);
 
     sendRealtimeEvent(session, {
         type: "conversation.item.create",
@@ -693,6 +713,13 @@ async function handleFunctionCall(session, event) {
             output: JSON.stringify(result),
         },
     });
+
+    if (shouldCloseAfterConversationEnd) {
+        session.conversationEndCloseRequested = true;
+        session.conversationEndCloseRequestedAt = Date.now();
+        session.conversationEndCloseResponseStarted = false;
+        session.conversationEndCloseResponseDone = false;
+    }
 
     sendRealtimeEvent(session, {
         type: "response.create",
@@ -708,6 +735,10 @@ async function handleFunctionCall(session, event) {
 
     if (humanTransfer && humanTransfer.transferred && !humanTransfer.message) {
         scheduleHumanTransferClose(session, "transfer_tool_without_message");
+    }
+
+    if (shouldCloseAfterConversationEnd) {
+        scheduleConversationEndClose(session, "save_call_event_call_ended");
     }
 }
 
@@ -775,6 +806,92 @@ function scheduleHumanTransferClose(session, trigger = "response_done") {
     };
 
     session.humanTransferCloseTimer = setTimeout(attemptClose, 220);
+}
+
+function scheduleConversationEndClose(session, trigger = "response_done") {
+    if (session.pendingHumanTransfer?.transferred || session.closedAt) {
+        return;
+    }
+
+    if (!session.conversationEndCloseRequested) {
+        session.conversationEndCloseRequested = true;
+        session.conversationEndCloseRequestedAt = Date.now();
+    }
+
+    if (session.conversationEndCloseTimer) {
+        return;
+    }
+
+    session.conversationEndCloseScheduled = true;
+
+    const attemptClose = () => {
+        session.conversationEndCloseTimer = null;
+
+        if (session.closedAt) {
+            return;
+        }
+
+        if (session.pendingHumanTransfer?.transferred) {
+            return;
+        }
+
+        const requestedAt = session.conversationEndCloseRequestedAt || Date.now();
+        const waitedMs = Date.now() - requestedAt;
+
+        if (!session.conversationEndCloseResponseDone && waitedMs < 8000) {
+            session.conversationEndCloseTimer = setTimeout(attemptClose, 220);
+            return;
+        }
+
+        if (isAiOutputActive(session)) {
+            session.conversationEndCloseTimer = setTimeout(attemptClose, 180);
+            return;
+        }
+
+        console.log("[ari:ai] closing ai session after conversation end", {
+            linkedid: session.linkedid,
+            sessionId: session.id,
+            trigger,
+        });
+
+        closeAiSession(session.id, "conversation_ended").catch((error) => {
+            session.lastError = error.message;
+            console.warn("[ari:ai] failed closing ai session after conversation end", {
+                linkedid: session.linkedid,
+                sessionId: session.id,
+                message: error.message,
+            });
+        });
+
+        pbxService.hangupCall(session.linkedid, "conversation_ended").catch((error) => {
+            console.warn("[ari:ai] failed hanging up PBX call after conversation end", {
+                linkedid: session.linkedid,
+                sessionId: session.id,
+                message: error.message,
+                status: error.status || error.response?.status || null,
+            });
+        });
+    };
+
+    session.conversationEndCloseTimer = setTimeout(attemptClose, 420);
+}
+
+function isConversationEndToolCall(event, args, result) {
+    if (event.name !== "save_call_event") {
+        return false;
+    }
+
+    if (!result || result.ok === false) {
+        return false;
+    }
+
+    const eventName = normalizeText(args.event).toLowerCase();
+
+    return [
+        "call_ended",
+        "conversation_ended",
+        "ended",
+    ].includes(eventName);
 }
 
 function handleInterruption(session, reason = "caller_interrupted") {
