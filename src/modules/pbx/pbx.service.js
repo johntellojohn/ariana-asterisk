@@ -951,17 +951,10 @@ function redirectStasisEarlyEndDecision(event) {
         return { shouldNotify: false };
     }
 
-    if (isRedirectCancelEvent(event)) {
+    if (isPrimaryRedirectLifecycleEnd(event, call)) {
         return {
             shouldNotify: true,
-            reason: "redirect_destination_cancelled",
-        };
-    }
-
-    if (isSecondaryRedirectLifecycleEvent(event) && !isExternalMediaLifecycleEvent(event)) {
-        return {
-            shouldNotify: true,
-            reason: "redirect_secondary_channel_ended",
+            reason: "redirect_primary_channel_ended",
         };
     }
 
@@ -1000,6 +993,19 @@ function isExternalMediaLifecycleEvent(event) {
     const eventName = String(event.event || "").toLowerCase();
 
     return channel.startsWith("UnicastRTP/") && ["bridgeleave", "hangup"].includes(eventName);
+}
+
+function isPrimaryRedirectLifecycleEnd(event, call) {
+    const eventName = String(event.event || "").toLowerCase();
+
+    if (!["hangup", "bridgeleave"].includes(eventName)) {
+        return false;
+    }
+
+    const primary = primaryCallChannel(call);
+    const channel = String(event.channel || "");
+
+    return Boolean(primary && channel && channel === primary);
 }
 
 function onRedirectStasisEarlyEnd(listener) {
