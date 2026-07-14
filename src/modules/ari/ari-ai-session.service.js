@@ -181,6 +181,7 @@ function createAiSession(linkedid, payload = {}) {
         dynamicTools: normalizeDynamicTools(payload.dynamic_tools || payload.dynamicTools),
         model: realtime.model || payload.model || env.openaiRealtimeModel,
         voice: realtime.voice || payload.voice || env.openaiRealtimeVoice,
+        speed: realtimeSpeed(realtime.speed ?? payload.speed),
         language: realtime.language || payload.language || env.trunkAiLanguage,
         instructions: realtime.instructions || payload.instructions || defaultInstructions(),
         turnDetection: realtime.turn_detection || payload.turn_detection || null,
@@ -336,6 +337,7 @@ function sessionConfig(session) {
                     rate: env.trunkAiOutputSampleRate,
                 },
                 voice: session.voice,
+                speed: session.speed,
             },
         },
         tools: configuredTools,
@@ -987,6 +989,7 @@ function snapshotAiSession(session) {
         tenant: session.tenant,
         model: session.model,
         voice: session.voice,
+        speed: session.speed,
         language: session.language,
         realtimeReady: session.realtimeReady,
         asteriskAudioReady: session.asteriskAudioReady,
@@ -1024,6 +1027,16 @@ function ensureAiEnabled() {
 
 function defaultInstructions() {
     return "Eres un agente de voz de EVA en una llamada telefonica. Responde en espanol con frases breves y naturales.";
+}
+
+function realtimeSpeed(value) {
+    const speed = Number(value);
+
+    if (!Number.isFinite(speed)) {
+        return 1;
+    }
+
+    return Math.min(1.5, Math.max(0.25, speed));
 }
 
 function functionTool(name, description, parameters) {
@@ -1190,6 +1203,7 @@ module.exports = {
     __test: {
         createAiSession,
         dynamicToolsInstructions,
+        sessionConfig,
         tools,
     },
 };

@@ -60,6 +60,32 @@ function testDynamicToolsAreMergedWithoutReplacingBaseTools() {
     );
 }
 
+function testRealtimeSpeedIsAppliedToAudioOutput() {
+    const session = ariAiSessionService.__test.createAiSession("linked-realtime-speed", {
+        realtime: {
+            speed: 1.35,
+        },
+    });
+
+    const config = ariAiSessionService.__test.sessionConfig(session);
+
+    assert.strictEqual(session.speed, 1.35);
+    assert.strictEqual(config.audio.output.speed, 1.35);
+}
+
+function testRealtimeSpeedIsClampedToRealtimeLimit() {
+    const session = ariAiSessionService.__test.createAiSession("linked-realtime-speed-clamped", {
+        realtime: {
+            speed: 3.25,
+        },
+    });
+
+    const config = ariAiSessionService.__test.sessionConfig(session);
+
+    assert.strictEqual(session.speed, 1.5);
+    assert.strictEqual(config.audio.output.speed, 1.5);
+}
+
 async function testUnknownToolRunsThroughGenericEndpoint() {
     const originalPost = axios.post;
     let request = null;
@@ -97,6 +123,8 @@ async function testUnknownToolRunsThroughGenericEndpoint() {
 
 async function main() {
     testDynamicToolsAreMergedWithoutReplacingBaseTools();
+    testRealtimeSpeedIsAppliedToAudioOutput();
+    testRealtimeSpeedIsClampedToRealtimeLimit();
     await testUnknownToolRunsThroughGenericEndpoint();
 }
 
