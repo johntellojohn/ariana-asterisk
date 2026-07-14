@@ -9,6 +9,7 @@ const { SpeechInterruptionGate } = require("./speech-interruption-gate");
 const { callTool } = require("../laravel/voice-agent-tools.service");
 
 const ASTERISK_PCM_RATE = 48000;
+const DISCONNECT_TONE_FREQUENCIES = [350, 400, 425, 440, 450, 480, 620];
 
 const aiSessionsById = new Map();
 const aiSessionsByLinkedId = new Map();
@@ -273,6 +274,9 @@ function createAiSession(linkedid, payload = {}) {
         conversationEndCloseRequestedAt: 0,
         conversationEndCloseResponseStarted: false,
         conversationEndCloseResponseDone: false,
+        disconnectToneMs: 0,
+        disconnectToneLastAt: 0,
+        disconnectToneClosed: false,
         lastError: null,
     };
 
@@ -528,6 +532,16 @@ function handleAsteriskAudio(session, pcm48) {
 
     session.asteriskAudioReady = true;
     const speechFrame = trackInputSpeech(session, pcm48);
+    const disconnectTone = trackDisconnectTone(session, pcm48, speechFrame);
+
+    if (disconnectTone.shouldClose) {
+        closeAfterDisconnectTone(session, disconnectTone.reason);
+        return;
+    }
+
+    if (disconnectTone.suppressRealtime) {
+        return;
+    }
 
     if (session.initialGreetingPending && !session.initialGreetingRequested) {
         requestInitialGreeting(session);
@@ -968,6 +982,7 @@ function trackInputSpeech(session, pcm48) {
     const frame = {
         at: now,
         durationMs,
+        level,
         hasSpeech,
     };
 
@@ -976,6 +991,156 @@ function trackInputSpeech(session, pcm48) {
     pruneInputSpeechFrames(session, now);
 
     return frame;
+}
+
+function trackDisconnectTone(session, pcm48, speechFrame) {
+    if (!env.trunkAiDisconnectToneEnabled || session.disconnectToneClosed) {
+        return { shouldClose: false, suppressRealtime: false };
+    }
+
+    if (session.outputFramesSent <= 0) {
+        return { shouldClose: false, suppressRealtime: false };
+    }
+
+    const durationMs = Math.max(1, speechFrame.durationMs || 0);
+    const tone = detectDisconnectTone(pcm48, speechFrame);
+
+    if (tone.detected) {
+        session.disconnectToneMs += durationMs;
+        session.disconnectToneLastAt = speechFrame.at;
+    } else {
+        session.disconnectToneMs = Math.max(0, session.disconnectToneMs - (durationMs * 0.65));
+    }
+
+    const suppressRealtime = session.disconnectToneMs >= env.trunkAiDisconnectToneSuppressMs;
+
+    if (session.disconnectToneMs < env.trunkAiDisconnectToneMinMs) {
+        return { shouldClose: false, suppressRealtime };
+    }
+
+    return {
+        shouldClose: true,
+        suppressRealtime: true,
+        reason: {
+            toneMs: Math.round(session.disconnectToneMs),
+            confidence: Number(tone.confidence.toFixed(4)),
+            level: Number(speechFrame.level.toFixed(5)),
+            frequency: tone.frequency,
+        },
+    };
+}
+
+function detectDisconnectTone(pcm48, speechFrame) {
+    const level = speechFrame.level || 0;
+
+    if (level < env.trunkAiDisconnectToneRmsThreshold) {
+        return { detected: false, confidence: 0, frequency: null };
+    }
+
+    const sampleRate = 8000;
+    const samples = downsamplePcm16ToFloat(pcm48, ASTERISK_PCM_RATE / sampleRate);
+
+    if (samples.length < 80) {
+        return { detected: false, confidence: 0, frequency: null };
+    }
+
+    const spectrum = strongestToneRatio(samples, sampleRate, DISCONNECT_TONE_FREQUENCIES);
+    const detected = spectrum.ratio >= env.trunkAiDisconnectToneRatioThreshold;
+
+    return {
+        detected,
+        confidence: spectrum.ratio,
+        frequency: spectrum.frequency,
+    };
+}
+
+function downsamplePcm16ToFloat(buffer, step) {
+    const stride = Math.max(1, Math.round(step));
+    const values = [];
+    let total = 0;
+
+    for (let offset = 0; offset + 1 < buffer.length; offset += 2 * stride) {
+        const value = buffer.readInt16LE(offset) / 32768;
+        values.push(value);
+        total += value;
+    }
+
+    if (!values.length) {
+        return values;
+    }
+
+    const mean = total / values.length;
+
+    return values.map((value) => value - mean);
+}
+
+function strongestToneRatio(samples, sampleRate, frequencies) {
+    const totalEnergy = samples.reduce((total, sample) => total + (sample * sample), 0);
+
+    if (totalEnergy <= 0) {
+        return { ratio: 0, frequency: null };
+    }
+
+    let best = { ratio: 0, frequency: null };
+
+    for (const frequency of frequencies) {
+        const power = goertzelPower(samples, sampleRate, frequency);
+        const ratio = power / (totalEnergy * samples.length);
+
+        if (ratio > best.ratio) {
+            best = { ratio, frequency };
+        }
+    }
+
+    return best;
+}
+
+function goertzelPower(samples, sampleRate, frequency) {
+    const omega = (2 * Math.PI * frequency) / sampleRate;
+    const coeff = 2 * Math.cos(omega);
+    let q0 = 0;
+    let q1 = 0;
+    let q2 = 0;
+
+    for (const sample of samples) {
+        q0 = (coeff * q1) - q2 + sample;
+        q2 = q1;
+        q1 = q0;
+    }
+
+    return (q1 * q1) + (q2 * q2) - (coeff * q1 * q2);
+}
+
+function closeAfterDisconnectTone(session, detail = {}) {
+    if (session.disconnectToneClosed || session.closedAt) {
+        return;
+    }
+
+    session.disconnectToneClosed = true;
+
+    console.log("[ari:ai] disconnect tone detected, closing trunk ai session", {
+        linkedid: session.linkedid,
+        sessionId: session.id,
+        ...detail,
+    });
+
+    closeAiSession(session.id, "disconnect_tone_detected").catch((error) => {
+        session.lastError = error.message;
+        console.warn("[ari:ai] failed closing ai session after disconnect tone", {
+            linkedid: session.linkedid,
+            sessionId: session.id,
+            message: error.message,
+        });
+    });
+
+    pbxService.hangupCall(session.linkedid, "disconnect_tone_detected").catch((error) => {
+        console.warn("[ari:ai] failed hanging up PBX call after disconnect tone", {
+            linkedid: session.linkedid,
+            sessionId: session.id,
+            message: error.message,
+            status: error.status || error.response?.status || null,
+        });
+    });
 }
 
 function pruneInputSpeechFrames(session, now = Date.now()) {
