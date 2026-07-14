@@ -1,4 +1,5 @@
 const AsteriskManager = require("asterisk-manager");
+const EventEmitter = require("events");
 const env = require("../../config/env");
 const laravelService = require("../laravel/laravel.service");
 
@@ -33,6 +34,7 @@ const callEvents = [];
 const callsByLinkedId = new Map();
 const rawEventsByLinkedId = new Map();
 const actionsByLinkedId = new Map();
+const lifecycleEvents = new EventEmitter();
 
 function start() {
     if (!env.pbxAmiEnabled) {
@@ -149,6 +151,7 @@ function handleManagerEvent(event) {
 
     updateCallSummary(normalized);
     logCallSummary(normalized.linkedid);
+    notifyRedirectStasisEarlyEnd(normalized);
     notifyLaravel(normalized);
 }
 
@@ -880,6 +883,91 @@ function notifyLaravel(event) {
     });
 }
 
+function notifyRedirectStasisEarlyEnd(event) {
+    const decision = redirectStasisEarlyEndDecision(event);
+
+    if (!decision.shouldNotify) {
+        return;
+    }
+
+    rememberAction(event.linkedid, "redirect_stasis_early_end_notified", {
+        event: event.event,
+        channel: event.channel,
+        destChannel: event.destChannel,
+        dialStatus: event.dialStatus,
+        reason: decision.reason,
+    });
+
+    console.log("[pbx:lifecycle] redirect stasis early end detected", {
+        linkedid: event.linkedid,
+        event: event.event,
+        channel: event.channel,
+        destChannel: event.destChannel,
+        dialStatus: event.dialStatus,
+        reason: decision.reason,
+    });
+
+    lifecycleEvents.emit("redirect-stasis-early-end", {
+        linkedid: event.linkedid,
+        event: { ...event },
+        reason: decision.reason,
+        call: getCallByLinkedId(event.linkedid),
+    });
+
+    hangupCall(event.linkedid, decision.reason)
+        .catch((error) => {
+            console.warn("[pbx:lifecycle] redirect stasis early hangup failed", {
+                linkedid: event.linkedid,
+                reason: decision.reason,
+                message: error.message,
+                status: error.status || error.response?.status || null,
+            });
+        });
+}
+
+function redirectStasisEarlyEndDecision(event) {
+    if (!event.linkedid) {
+        return { shouldNotify: false };
+    }
+
+    const call = callsByLinkedId.get(event.linkedid);
+
+    if (!call) {
+        return { shouldNotify: false };
+    }
+
+    const actions = actionsByLinkedId.get(event.linkedid) || [];
+    const redirectRequested = actions.some((item) =>
+        item.action === "redirect_stasis_requested" ||
+        item.action === "redirect_stasis_sent"
+    );
+    const alreadyNotified = actions.some((item) => item.action === "redirect_stasis_early_end_notified");
+
+    if (!redirectRequested || alreadyNotified) {
+        return { shouldNotify: false };
+    }
+
+    if (call.answered || call.bridged) {
+        return { shouldNotify: false };
+    }
+
+    if (isRedirectCancelEvent(event)) {
+        return {
+            shouldNotify: true,
+            reason: "redirect_destination_cancelled",
+        };
+    }
+
+    if (isSecondaryRedirectLifecycleEvent(event) && !isExternalMediaLifecycleEvent(event)) {
+        return {
+            shouldNotify: true,
+            reason: "redirect_secondary_channel_ended",
+        };
+    }
+
+    return { shouldNotify: false };
+}
+
 function isRedirectCancelEvent(event) {
     const actions = actionsByLinkedId.get(event.linkedid) || [];
 
@@ -912,6 +1000,12 @@ function isExternalMediaLifecycleEvent(event) {
     const eventName = String(event.event || "").toLowerCase();
 
     return channel.startsWith("UnicastRTP/") && ["bridgeleave", "hangup"].includes(eventName);
+}
+
+function onRedirectStasisEarlyEnd(listener) {
+    lifecycleEvents.on("redirect-stasis-early-end", listener);
+
+    return () => lifecycleEvents.off("redirect-stasis-early-end", listener);
 }
 
 async function originateExtension(fromExtension, toExtension) {
@@ -1131,6 +1225,7 @@ module.exports = {
     hangupCall,
     connectCallToExtension,
     redirectCallToStasis,
+    onRedirectStasisEarlyEnd,
     originateExtension,
     originateExternal,
     originateDirect,

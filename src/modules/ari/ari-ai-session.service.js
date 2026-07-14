@@ -3,6 +3,7 @@ const WebSocket = require("ws");
 
 const env = require("../../config/env");
 const ariMediaService = require("./ari-media.service");
+const pbxService = require("../pbx/pbx.service");
 const { resamplePcm16 } = require("./pcm-utils");
 const { SpeechInterruptionGate } = require("./speech-interruption-gate");
 const { callTool } = require("../laravel/voice-agent-tools.service");
@@ -11,6 +12,32 @@ const ASTERISK_PCM_RATE = 48000;
 
 const aiSessionsById = new Map();
 const aiSessionsByLinkedId = new Map();
+
+pbxService.onRedirectStasisEarlyEnd((payload) => {
+    const linkedid = String(payload?.linkedid || "").trim();
+    const session = linkedid ? aiSessionsByLinkedId.get(linkedid) : null;
+
+    if (!session || session.closedAt) {
+        return;
+    }
+
+    console.log("[ari:ai] closing realtime session after redirect early end", {
+        linkedid,
+        sessionId: session.id,
+        status: session.status,
+        mediaSessionId: session.mediaSessionId,
+        reason: payload.reason || "redirect_stasis_early_end",
+    });
+
+    closeAiSession(session.id, payload.reason || "redirect_stasis_early_end")
+        .catch((error) => {
+            console.warn("[ari:ai] close after redirect early end failed", {
+                linkedid,
+                sessionId: session.id,
+                message: error.message,
+            });
+        });
+});
 
 async function startAiSessionByLinkedId(linkedid, payload = {}) {
     ensureAiEnabled();
@@ -60,6 +87,16 @@ async function startAiSessionByLinkedId(linkedid, payload = {}) {
 
         await connectRealtime(session);
 
+        if (session.closedAt) {
+            console.log("[ari:ai] realtime trunk session start aborted after early close", {
+                linkedid: session.linkedid,
+                sessionId: session.id,
+                closeReason: session.closeReason,
+            });
+
+            return snapshotAiSession(session);
+        }
+
         console.log("[ari:ai] OpenAI realtime websocket ready, starting ARI media", {
             linkedid: session.linkedid,
             sessionId: session.id,
@@ -86,6 +123,23 @@ async function startAiSessionByLinkedId(linkedid, payload = {}) {
         );
 
         session.mediaSessionId = mediaSession.id || null;
+
+        if (session.closedAt) {
+            if (session.mediaSessionId) {
+                await ariMediaService.closeMediaSession(session.mediaSessionId, session.closeReason || "redirect_stasis_early_end")
+                    .catch((error) => {
+                        console.warn("[ari:ai] media close after early session close failed", {
+                            linkedid: session.linkedid,
+                            sessionId: session.id,
+                            mediaSessionId: session.mediaSessionId,
+                            message: error.message,
+                        });
+                    });
+            }
+
+            return snapshotAiSession(session);
+        }
+
         session.status = "active";
         session.updatedAt = new Date().toISOString();
 
