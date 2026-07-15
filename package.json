@@ -11,6 +11,7 @@
     "check:ari": "node scripts/check-ari.js",
     "diagnose:call": "node scripts/diagnose-call.js",
     "test:trunk-callback": "node scripts/test-trunk-callback.js",
+    "test:human-to-ai-transfer": "node scripts/test-human-to-ai-transfer.js",
     "docker:up": "docker compose up -d --build",
     "docker:down": "docker compose down",
     "docker:logs": "docker compose logs -f api"

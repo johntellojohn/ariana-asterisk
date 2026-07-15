@@ -13,6 +13,9 @@ const DISCONNECT_TONE_FREQUENCIES = [350, 400, 425, 440, 450, 480, 620];
 
 const aiSessionsById = new Map();
 const aiSessionsByLinkedId = new Map();
+const runtimeHooks = {
+    connectRealtime: (session) => connectRealtime(session),
+};
 
 pbxService.onRedirectStasisEarlyEnd((payload) => {
     const linkedid = String(payload?.linkedid || "").trim();
@@ -170,6 +173,104 @@ async function startAiSessionByLinkedId(linkedid, payload = {}) {
     }
 }
 
+async function activateAiSessionByLinkedId(linkedid, payload = {}) {
+    ensureAiEnabled();
+
+    const targetLinkedid = String(linkedid || "").trim();
+    const transferId = String(payload.transfer_id || payload.transferId || "").trim();
+
+    if (!targetLinkedid) {
+        const error = new Error("linkedid is required");
+        error.status = 422;
+        throw error;
+    }
+
+    if (!transferId) {
+        const error = new Error("transfer_id is required");
+        error.status = 422;
+        throw error;
+    }
+
+    const existingAi = aiSessionsByLinkedId.get(targetLinkedid);
+
+    if (existingAi && !existingAi.closedAt) {
+        if (existingAi.activationTransferId === transferId && existingAi.status === "active") {
+            return snapshotAiSession(existingAi);
+        }
+
+        const error = new Error("Another AI participant is active or being prepared for this call");
+        error.status = 409;
+        throw error;
+    }
+
+    const mediaBefore = ariMediaService.getMediaSession(targetLinkedid);
+
+    if (!mediaBefore || mediaBefore.owner !== "agent" || !mediaBefore.hasAgentWebSocket) {
+        const error = new Error("Call is not currently connected to a human agent through ARI media");
+        error.status = 409;
+        throw error;
+    }
+
+    const session = createAiSession(targetLinkedid, payload);
+    session.activationTransferId = transferId;
+    session.status = "ai_preparing";
+    aiSessionsById.set(session.id, session);
+    aiSessionsByLinkedId.set(targetLinkedid, session);
+
+    console.log("[ari:ai] preparing human to AI transfer", {
+        linkedid: targetLinkedid,
+        sessionId: session.id,
+        transferId,
+        fromAgentId: mediaBefore.activeAgentId,
+        aiAgentId: session.agentId,
+    });
+
+    try {
+        await runtimeHooks.connectRealtime(session);
+
+        const mediaSession = ariMediaService.activateAiOwner(targetLinkedid, {
+            transferId,
+            agentId: session.agentId,
+            onAsteriskPcm48: (pcm48) => handleAsteriskAudio(session, pcm48),
+            onClose: () => {
+                closeAiSession(session.id, "media_session_closed", {
+                    closeMedia: false,
+                }).catch((error) => {
+                    console.warn("[ari:ai] close after transferred media end failed", {
+                        linkedid: session.linkedid,
+                        message: error.message,
+                    });
+                });
+            },
+        });
+
+        session.mediaSessionId = mediaSession.id || null;
+        session.status = "active";
+        session.updatedAt = new Date().toISOString();
+
+        console.log("[ari:ai] human to AI transfer active", {
+            linkedid: session.linkedid,
+            sessionId: session.id,
+            mediaSessionId: session.mediaSessionId,
+            transferId,
+            aiAgentId: session.agentId,
+            hasHandoffContext: Boolean(session.handoffContext),
+        });
+
+        return snapshotAiSession(session);
+    } catch (error) {
+        session.lastError = error.message;
+        session.status = "failed";
+        session.updatedAt = new Date().toISOString();
+
+        await closeAiSession(session.id, "human_to_ai_transfer_failed", {
+            closeMedia: false,
+        }).catch(() => {});
+
+        throw error;
+    }
+}
+
 async function closeAiSession(idOrLinkedid, reason = "closed", options = {}) {
     const session = getMutableSession(idOrLinkedid);
 
@@ -245,9 +346,11 @@ function createAiSession(linkedid, payload = {}) {
         language: realtime.language || payload.language || env.trunkAiLanguage,
         instructions: realtime.instructions || payload.instructions || defaultInstructions(),
         turnDetection: realtime.turn_detection || payload.turn_detection || null,
-        initialGreeting: normalizeText(payload.initial_greeting || payload.initialGreeting),
-        initialGreetingPending: Boolean(normalizeText(payload.initial_greeting || payload.initialGreeting)),
+        initialGreeting: normalizeText(payload.handoff_greeting || payload.handoffGreeting || payload.initial_greeting || payload.initialGreeting),
+        initialGreetingPending: Boolean(normalizeText(payload.handoff_greeting || payload.handoffGreeting || payload.initial_greeting || payload.initialGreeting)),
         initialGreetingRequested: false,
+        handoffContext: normalizeText(payload.handoff_context || payload.handoffContext),
+        activationTransferId: null,
         realtimeSocket: null,
         realtimeReady: false,
         asteriskAudioReady: false,
@@ -378,6 +481,7 @@ function sessionConfig(session) {
         instructions: [
             session.instructions,
             dynamicToolsInstructions(session),
+            handoffContextInstructions(session),
             humanTransferInstructions(),
         ].filter(Boolean).join("\n\n"),
         output_modalities: ["audio"],
@@ -422,6 +526,20 @@ function humanTransferInstructions() {
         "- Si no entiendes la solicitud despues de intentarlo brevemente, debes llamar transfer_to_human con trigger ai_confusion.",
         "- Si el cliente esta molesto, frustrado o dice que no lo estas entendiendo, debes llamar transfer_to_human con trigger customer_frustrated.",
         "- No digas que no puedes transferir. Usa la herramienta transfer_to_human y luego di exactamente el mensaje que devuelva la herramienta.",
+    ].join("\n");
+}
+
+function handoffContextInstructions(session = {}) {
+    if (!session.handoffContext) {
+        return "";
+    }
+
+    return [
+        "Contexto de transferencia de esta llamada:",
+        session.handoffContext,
+        "- La llamada ya estaba siendo atendida. Continua desde este punto.",
+        "- No vuelvas a pedir datos que el contexto indique como confirmados.",
+        "- Si necesitas verificar algo ambiguo, pregunta solo por ese dato.",
     ].join("\n");
 }
 
@@ -1321,6 +1439,8 @@ function snapshotAiSession(session) {
         closedAt: session.closedAt,
         closeReason: session.closeReason,
         mediaSessionId: session.mediaSessionId,
+        activationTransferId: session.activationTransferId,
+        hasHandoffContext: Boolean(session.handoffContext),
         agentId: session.agentId,
         tenant: session.tenant,
         model: session.model,
@@ -1533,6 +1653,7 @@ function waitForRealtimeSessionUpdated(socket, timeoutMs) {
 
 module.exports = {
     startAiSessionByLinkedId,
+    activateAiSessionByLinkedId,
     closeAiSession,
     getAiSession,
     listAiSessions,
@@ -1541,5 +1662,16 @@ module.exports = {
         dynamicToolsInstructions,
         sessionConfig,
         tools,
+        handoffContextInstructions,
+        setConnectRealtime(handler) {
+            runtimeHooks.connectRealtime = handler;
+        },
+        resetConnectRealtime() {
+            runtimeHooks.connectRealtime = (session) => connectRealtime(session);
+        },
+        resetAiSessions() {
+            aiSessionsById.clear();
+            aiSessionsByLinkedId.clear();
+        },
     },
 };

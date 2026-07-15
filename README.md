@@ -38,6 +38,7 @@ Para que EVA use audio en navegador con ARI, configura el JSON de la integracion
 - `POST /api/ari/calls/:linkedid/media-session`
 - `POST /api/ari/calls/:linkedid/media-session/close`
 - `POST /api/ari/calls/:linkedid/ai-session`
+- `POST /api/ari/calls/:linkedid/ai-session/activate`
 - `POST /api/ari/calls/:linkedid/ai-session/close`
 - `POST /api/ari/calls/:linkedid/answer`
 - `POST /api/ari/calls/:linkedid/bridge`

@@ -285,6 +285,37 @@ async function startCallAiSession(req, res, next) {
     }
 }
 
+async function activateCallAiSession(req, res, next) {
+    console.log("[ari:ai] human to AI activation request received", {
+        linkedid: req.params.linkedid,
+        transferId: req.body?.transfer_id || null,
+        agentId: req.body?.agent_id || null,
+        hasHandoffContext: Boolean(String(req.body?.handoff_context || "").trim()),
+    });
+
+    try {
+        const session = await ariAiSessionService.activateAiSessionByLinkedId(
+            req.params.linkedid,
+            req.body || {}
+        );
+
+        res.json({
+            ok: true,
+            data: session,
+        });
+    } catch (error) {
+        console.warn("[ari:ai] human to AI activation failed", {
+            linkedid: req.params.linkedid,
+            transferId: req.body?.transfer_id || null,
+            agentId: req.body?.agent_id || null,
+            status: error.status || null,
+            message: error.message,
+        });
+
+        next(error);
+    }
+}
+
 async function closeCallAiSession(req, res, next) {
     try {
         const session = await ariAiSessionService.closeAiSession(
@@ -319,6 +350,7 @@ module.exports = {
     startCallMediaSession,
     closeCallMediaSession,
     startCallAiSession,
+    activateCallAiSession,
     closeCallAiSession,
     answerSession,
     answerCall,

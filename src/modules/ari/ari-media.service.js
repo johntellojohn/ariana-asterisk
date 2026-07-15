@@ -251,7 +251,7 @@ function attachAgentWebSocket(linkedid, ws, options = {}) {
     });
 
     ws.on("message", (message, isBinary) => {
-        if (!isBinary || session.status === "closed") {
+        if (!isBinary || session.status === "closed" || session.agentWs !== ws) {
             return;
         }
 
@@ -282,6 +282,80 @@ function attachAgentWebSocket(linkedid, ws, options = {}) {
     });
 
     return true;
+}
+
+function activateAiOwner(idOrLinkedid, options = {}) {
+    const key = String(idOrLinkedid || "").trim();
+    const session = mediaSessionsById.get(key) || mediaSessionsByLinkedId.get(key);
+    const transferId = String(options.transferId || options.transfer_id || "").trim();
+
+    if (!transferId) {
+        const error = new Error("transfer_id is required");
+        error.status = 422;
+        throw error;
+    }
+
+    if (!session || session.status === "closed") {
+        const error = new Error("ARI media session not found");
+        error.status = 404;
+        throw error;
+    }
+
+    if (session.owner === "ai" && session.lastTransferId === transferId) {
+        return snapshotMediaSession(session);
+    }
+
+    if (session.owner !== "agent") {
+        const error = new Error(`ARI media session is not owned by a human agent (${session.owner || "unknown"})`);
+        error.status = 409;
+        throw error;
+    }
+
+    const humanWs = session.agentWs;
+    const humanAgentId = session.activeAgentId;
+
+    if (!humanWs || humanWs.readyState !== 1) {
+        const error = new Error("Human agent WebSocket is not connected");
+        error.status = 409;
+        throw error;
+    }
+
+    clearAsteriskAudioQueue(session.id, "human_to_ai_transfer");
+    session.owner = "ai";
+    session.aiAgentId = options.agentId || options.agent_id || null;
+    session.lastTransferId = transferId;
+    session.onAsteriskPcm48 = typeof options.onAsteriskPcm48 === "function"
+        ? options.onAsteriskPcm48
+        : null;
+    session.onClose = typeof options.onClose === "function"
+        ? options.onClose
+        : null;
+    session.agentWs = null;
+    session.activeAgentId = null;
+    session.status = "ai_connected";
+    session.updatedAt = new Date().toISOString();
+
+    if (session.recording) {
+        session.recording.addParticipantTransition({
+            transfer_id: transferId,
+            from_type: "human",
+            from_id: humanAgentId,
+            to_type: "ai",
+            to_id: session.aiAgentId,
+        });
+        session.recording.agentId = session.aiAgentId;
+    }
+
+    humanWs.close(1000, "transferred_to_ai");
+
+    console.log("[ari:media] media owner transferred from human to AI", {
+        linkedid: session.linkedid,
+        transferId,
+        fromAgentId: humanAgentId,
+        aiAgentId: session.aiAgentId,
+    });
+
+    return snapshotMediaSession(session);
 }
 
 function createMediaSession(linkedid, ariSession, options = {}) {
@@ -316,6 +390,8 @@ function createMediaSession(linkedid, ariSession, options = {}) {
         agentWebSocketUrl: publicWebSocketUrl(path),
         agentWs: null,
         activeAgentId: options.agentId || null,
+        aiAgentId: null,
+        lastTransferId: null,
         lastError: null,
         onAsteriskPcm48: typeof options.onAsteriskPcm48 === "function"
             ? options.onAsteriskPcm48
@@ -585,6 +661,8 @@ function snapshotMediaSession(session) {
         agentFramesReceived: session.agentFramesReceived,
         browserFramesSent: session.browserFramesSent,
         activeAgentId: session.activeAgentId,
+        aiAgentId: session.aiAgentId || null,
+        lastTransferId: session.lastTransferId || null,
         agentWebSocketUrl: session.agentWebSocketUrl,
         agentWebSocketPath: session.agentWebSocketPath,
         hasAgentWebSocket: Boolean(session.agentWs && session.agentWs.readyState === 1),
@@ -675,6 +753,17 @@ module.exports = {
     listMediaSessions,
     closeMediaSession,
     attachAgentWebSocket,
+    activateAiOwner,
     sendPcm48ToAsterisk,
     clearAsteriskAudioQueue,
+    __test: {
+        registerMediaSession(session) {
+            mediaSessionsById.set(session.id, session);
+            mediaSessionsByLinkedId.set(session.linkedid, session);
+        },
+        resetMediaSessions() {
+            mediaSessionsById.clear();
+            mediaSessionsByLinkedId.clear();
+        },
+    },
 };

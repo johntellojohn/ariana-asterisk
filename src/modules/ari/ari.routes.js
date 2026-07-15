@@ -16,6 +16,7 @@ router.get("/calls/:linkedid", ariController.showCall);
 router.post("/calls/:linkedid/media-session", ariController.startCallMediaSession);
 router.post("/calls/:linkedid/media-session/close", ariController.closeCallMediaSession);
 router.post("/calls/:linkedid/ai-session", ariController.startCallAiSession);
+router.post("/calls/:linkedid/ai-session/activate", ariController.activateCallAiSession);
 router.post("/calls/:linkedid/ai-session/close", ariController.closeCallAiSession);
 router.post("/calls/:linkedid/answer", ariController.answerCall);
 router.post("/calls/:linkedid/bridge", ariController.bridgeCall);

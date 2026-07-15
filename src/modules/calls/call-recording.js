@@ -46,6 +46,7 @@ class CallRecording {
             agent: this.createSource("agent"),
         };
         this.transcriptSegments = [];
+        this.participantTransitions = [];
     }
 
     createSource(source) {
@@ -86,6 +87,21 @@ class CallRecording {
             event: event.type || null,
             event_id: event.event_id || null,
             at_ms: this.elapsedMs(),
+        });
+    }
+
+    addParticipantTransition(transition = {}) {
+        if (!transition || typeof transition !== "object") {
+            return;
+        }
+
+        this.participantTransitions.push({
+            at: transition.at || new Date().toISOString(),
+            transfer_id: transition.transfer_id || null,
+            from_type: transition.from_type || null,
+            from_id: transition.from_id || null,
+            to_type: transition.to_type || null,
+            to_id: transition.to_id || null,
         });
     }
 
@@ -240,6 +256,7 @@ class CallRecording {
                 playback_mix: "mono_centered",
                 customer_frames: this.sources.customer.frames,
                 agent_frames: this.sources.agent.frames,
+                participant_transitions: this.participantTransitions,
                 analysis,
             },
         };
