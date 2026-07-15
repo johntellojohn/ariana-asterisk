@@ -206,8 +206,13 @@ async function closeMediaSession(idOrLinkedid, reason = "closed") {
         });
     }
 
-    mediaSessionsById.delete(session.id);
-    mediaSessionsByLinkedId.delete(session.linkedid);
+    if (mediaSessionsById.get(session.id) === session) {
+        mediaSessionsById.delete(session.id);
+    }
+
+    if (mediaSessionsByLinkedId.get(session.linkedid) === session) {
+        mediaSessionsByLinkedId.delete(session.linkedid);
+    }
 
     if (typeof session.onClose === "function") {
         try {

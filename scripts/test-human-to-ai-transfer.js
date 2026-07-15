@@ -20,15 +20,18 @@ function recording() {
         finalized: false,
         agentId: null,
         participantTransitions: [],
+        async finalize() {
+            this.finalized = true;
+        },
         addParticipantTransition(transition) {
             this.participantTransitions.push(transition);
         },
     };
 }
 
-function registerHumanMediaSession(linkedid, ws, recorder) {
-    ariMediaService.__test.registerMediaSession({
-        id: `media-${linkedid}`,
+function registerHumanMediaSession(linkedid, ws, recorder, id = `media-${linkedid}`) {
+    const session = {
+        id,
         linkedid,
         owner: "agent",
         channelId: `channel-${linkedid}`,
@@ -60,7 +63,64 @@ function registerHumanMediaSession(linkedid, ws, recorder) {
         onAsteriskPcm48: null,
         onClose: null,
         lastError: null,
+    };
+
+    ariMediaService.__test.registerMediaSession(session);
+
+    return session;
+}
+
+async function testSlowOldCloseDoesNotDeleteReplacementMediaSession() {
+    ariAiSessionService.__test.resetAiSessions();
+    ariMediaService.__test.resetMediaSessions();
+
+    const linkedid = "linked-media-replacement";
+    const oldWs = humanWebSocket();
+    const oldRecorder = recording();
+    let releaseFinalize;
+    let markFinalizeStarted;
+    const finalizeStarted = new Promise((resolve) => {
+        markFinalizeStarted = resolve;
     });
+    const finalizeReleased = new Promise((resolve) => {
+        releaseFinalize = resolve;
+    });
+
+    oldRecorder.finalize = async function finalize() {
+        markFinalizeStarted();
+        await finalizeReleased;
+        this.finalized = true;
+    };
+
+    const oldSession = registerHumanMediaSession(
+        linkedid,
+        oldWs,
+        oldRecorder,
+        "media-old-replacement"
+    );
+    oldSession.externalChannelId = null;
+    const closing = ariMediaService.closeMediaSession(oldSession.id, "human_transfer_started");
+
+    await finalizeStarted;
+
+    const replacementWs = humanWebSocket();
+    const replacementRecorder = recording();
+    const replacement = registerHumanMediaSession(
+        linkedid,
+        replacementWs,
+        replacementRecorder,
+        "media-new-replacement"
+    );
+
+    releaseFinalize();
+    await closing;
+
+    const current = ariMediaService.getMediaSession(linkedid);
+
+    assert.strictEqual(current.id, replacement.id);
+    assert.strictEqual(current.owner, "agent");
+    assert.strictEqual(current.hasAgentWebSocket, true);
+    assert.strictEqual(replacementWs.closeCalls.length, 0);
 }
 
 async function testHumanRemainsConnectedUntilRealtimeIsReady() {
@@ -160,6 +220,7 @@ async function main() {
     env.openaiApiKey = env.openaiApiKey || "test-openai-key";
 
     try {
+        await testSlowOldCloseDoesNotDeleteReplacementMediaSession();
         await testHumanRemainsConnectedUntilRealtimeIsReady();
         await testRealtimeFailureKeepsHumanConnected();
         testHandoffContextIsIncludedInRealtimeInstructions();

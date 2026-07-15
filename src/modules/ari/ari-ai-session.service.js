@@ -306,8 +306,13 @@ async function closeAiSession(idOrLinkedid, reason = "closed", options = {}) {
         }
     }
 
-    aiSessionsById.delete(session.id);
-    aiSessionsByLinkedId.delete(session.linkedid);
+    if (aiSessionsById.get(session.id) === session) {
+        aiSessionsById.delete(session.id);
+    }
+
+    if (aiSessionsByLinkedId.get(session.linkedid) === session) {
+        aiSessionsByLinkedId.delete(session.linkedid);
+    }
 
     return snapshotAiSession(session);
 }
