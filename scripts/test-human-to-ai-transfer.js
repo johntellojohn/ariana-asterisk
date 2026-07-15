@@ -8,6 +8,10 @@ function humanWebSocket() {
     return {
         readyState: 1,
         closeCalls: [],
+        handlers: {},
+        on(event, handler) {
+            this.handlers[event] = handler;
+        },
         close(code, reason) {
             this.closeCalls.push({ code, reason });
             this.readyState = 3;
@@ -55,6 +59,7 @@ function registerHumanMediaSession(linkedid, ws, recorder, id = `media-${linkedi
         activeAgentId: 77,
         aiAgentId: null,
         lastTransferId: null,
+        wsKey: `key-${linkedid}`,
         agentWebSocketUrl: `ws://test/${linkedid}`,
         agentWebSocketPath: `/test/${linkedid}`,
         agentWs: ws,
@@ -121,6 +126,104 @@ async function testSlowOldCloseDoesNotDeleteReplacementMediaSession() {
     assert.strictEqual(current.owner, "agent");
     assert.strictEqual(current.hasAgentWebSocket, true);
     assert.strictEqual(replacementWs.closeCalls.length, 0);
+}
+
+async function testAiHumanAiTransferKeepsOneMediaSessionAndRecording() {
+    ariAiSessionService.__test.resetAiSessions();
+    ariMediaService.__test.resetMediaSessions();
+
+    const linkedid = "linked-full-recording";
+    const recorder = recording();
+    recorder.agentId = 2;
+    const mediaSession = registerHumanMediaSession(
+        linkedid,
+        null,
+        recorder,
+        "media-full-recording"
+    );
+    mediaSession.owner = "ai";
+    mediaSession.status = "ai_connected";
+    mediaSession.activeAgentId = null;
+    mediaSession.aiAgentId = 2;
+    mediaSession.externalChannelId = null;
+    mediaSession.onAsteriskPcm48 = () => {};
+    mediaSession.onClose = () => {};
+
+    const initialAiSession = ariAiSessionService.__test.createAiSession(linkedid, {
+        agent_id: 2,
+    });
+    initialAiSession.status = "active";
+    initialAiSession.mediaSessionId = mediaSession.id;
+    initialAiSession.realtimeReady = true;
+    initialAiSession.realtimeSocket = {
+        readyState: 1,
+        close() {
+            this.readyState = 3;
+        },
+    };
+    ariAiSessionService.__test.registerAiSession(initialAiSession);
+
+    await ariAiSessionService.closeAiSession(initialAiSession.id, "human_transfer_started", {
+        handoffToAgent: true,
+        transferId: "ai-human-transfer-1",
+        agentId: 77,
+    });
+
+    const humanMedia = ariMediaService.getMediaSession(linkedid);
+
+    assert.strictEqual(ariAiSessionService.getAiSession(linkedid), null);
+    assert.strictEqual(humanMedia.id, mediaSession.id);
+    assert.strictEqual(humanMedia.externalChannelId, mediaSession.externalChannelId);
+    assert.strictEqual(humanMedia.owner, "agent");
+    assert.strictEqual(humanMedia.activeAgentId, 77);
+    assert.strictEqual(recorder.finalized, false);
+    assert.strictEqual(recorder.participantTransitions.length, 1);
+    assert.strictEqual(recorder.participantTransitions[0].from_type, "ai");
+    assert.strictEqual(recorder.participantTransitions[0].from_id, 2);
+    assert.strictEqual(recorder.participantTransitions[0].to_type, "human");
+    assert.strictEqual(recorder.participantTransitions[0].to_id, 77);
+
+    const reusedMedia = await ariMediaService.startMediaSessionByLinkedId(linkedid, {
+        owner: "agent",
+        agentId: 77,
+    });
+    const wsUrl = new URL(reusedMedia.agentWebSocketPath, "http://gateway.test");
+    const humanWs = humanWebSocket();
+
+    assert.strictEqual(reusedMedia.id, mediaSession.id);
+    assert.strictEqual(wsUrl.searchParams.get("agent_id"), "77");
+    assert.strictEqual(
+        ariMediaService.attachAgentWebSocket(linkedid, humanWs, {
+            key: wsUrl.searchParams.get("key"),
+            agentId: 77,
+        }),
+        true
+    );
+
+    ariAiSessionService.__test.setConnectRealtime(async (session) => {
+        session.realtimeSocket = { readyState: 1, close() {} };
+        session.realtimeReady = true;
+        session.status = "realtime_ready";
+    });
+
+    const returnedToAi = await ariAiSessionService.activateAiSessionByLinkedId(linkedid, {
+        transfer_id: "human-ai-transfer-2",
+        agent_id: 25,
+        handoff_context: "El humano ya valido al cliente.",
+    });
+
+    assert.strictEqual(returnedToAi.mediaSessionId, mediaSession.id);
+    assert.strictEqual(ariMediaService.getMediaSession(linkedid).id, mediaSession.id);
+    assert.strictEqual(recorder.finalized, false);
+    assert.strictEqual(recorder.participantTransitions.length, 2);
+    assert.strictEqual(recorder.participantTransitions[1].from_type, "human");
+    assert.strictEqual(recorder.participantTransitions[1].from_id, 77);
+    assert.strictEqual(recorder.participantTransitions[1].to_type, "ai");
+    assert.strictEqual(recorder.participantTransitions[1].to_id, 25);
+
+    await ariMediaService.closeMediaSession(mediaSession.id, "ari_channel_ended");
+
+    assert.strictEqual(recorder.finalized, true);
 }
 
 async function testHumanRemainsConnectedUntilRealtimeIsReady() {
@@ -221,6 +324,7 @@ async function main() {
 
     try {
         await testSlowOldCloseDoesNotDeleteReplacementMediaSession();
+        await testAiHumanAiTransferKeepsOneMediaSessionAndRecording();
         await testHumanRemainsConnectedUntilRealtimeIsReady();
         await testRealtimeFailureKeepsHumanConnected();
         testHandoffContextIsIncludedInRealtimeInstructions();

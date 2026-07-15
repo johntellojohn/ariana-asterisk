@@ -301,7 +301,12 @@ async function closeAiSession(idOrLinkedid, reason = "closed", options = {}) {
         session.realtimeSocket = null;
         session.realtimeReady = false;
 
-        if (options.closeMedia !== false && session.mediaSessionId) {
+        if (options.handoffToAgent === true && session.mediaSessionId) {
+            ariMediaService.activateAgentOwner(session.mediaSessionId, {
+                transferId: options.transferId || options.transfer_id || null,
+                agentId: options.agentId || options.agent_id || null,
+            });
+        } else if (options.closeMedia !== false && session.mediaSessionId) {
             await ariMediaService.closeMediaSession(session.mediaSessionId, reason);
         }
     }
@@ -832,6 +837,8 @@ async function handleFunctionCall(session, event) {
         session.pendingHumanTransfer = {
             status: humanTransfer.status,
             message: humanTransfer.message,
+            transferId: event.call_id || null,
+            agentId: humanTransfer.agentId,
             transferred: true,
             closeScheduled: false,
             requestedAt: new Date().toISOString(),
@@ -889,6 +896,9 @@ function humanTransferResult(result) {
     return {
         status,
         message,
+        agentId: data.agent && typeof data.agent === "object"
+            ? data.agent.id || null
+            : null,
         transferred: Boolean(data.transferred)
             || status === "transferred"
             || status === "already_transferred",
@@ -932,7 +942,11 @@ function scheduleHumanTransferClose(session, trigger = "response_done") {
             transferStatus: session.pendingHumanTransfer?.status || null,
         });
 
-        closeAiSession(session.id, "human_transfer_started").catch((error) => {
+        closeAiSession(session.id, "human_transfer_started", {
+            handoffToAgent: true,
+            transferId: session.pendingHumanTransfer?.transferId || null,
+            agentId: session.pendingHumanTransfer?.agentId || null,
+        }).catch((error) => {
             session.lastError = error.message;
             console.warn("[ari:ai] failed closing ai session after human transfer", {
                 linkedid: session.linkedid,
@@ -1668,6 +1682,10 @@ module.exports = {
         sessionConfig,
         tools,
         handoffContextInstructions,
+        registerAiSession(session) {
+            aiSessionsById.set(session.id, session);
+            aiSessionsByLinkedId.set(session.linkedid, session);
+        },
         setConnectRealtime(handler) {
             runtimeHooks.connectRealtime = handler;
         },

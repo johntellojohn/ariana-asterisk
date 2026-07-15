@@ -318,9 +318,17 @@ async function activateCallAiSession(req, res, next) {
 
 async function closeCallAiSession(req, res, next) {
     try {
+        const reason = req.body.reason || "closed_by_api";
+        const humanAnswer = String(reason).match(/^human_agent_(\d+)_answering$/i);
         const session = await ariAiSessionService.closeAiSession(
             req.params.linkedid,
-            req.body.reason || "closed_by_api"
+            reason,
+            humanAnswer
+                ? {
+                    handoffToAgent: true,
+                    agentId: Number(humanAnswer[1]),
+                }
+                : {}
         );
 
         if (!session) {

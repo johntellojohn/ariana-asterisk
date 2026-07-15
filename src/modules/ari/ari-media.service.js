@@ -60,6 +60,15 @@ async function startMediaSessionByLinkedId(linkedid, options = {}) {
             throw error;
         }
 
+        if (
+            options.owner === "agent" &&
+            options.agentId &&
+            !(existing.agentWs && existing.agentWs.readyState === 1) &&
+            String(existing.activeAgentId || "") !== String(options.agentId)
+        ) {
+            refreshAgentWebSocketAccess(existing, options.agentId);
+        }
+
         return snapshotMediaSession(existing);
     }
 
@@ -250,6 +259,10 @@ function attachAgentWebSocket(linkedid, ws, options = {}) {
     session.status = "agent_connected";
     session.updatedAt = new Date().toISOString();
 
+    if (session.recording) {
+        session.recording.agentId = session.activeAgentId;
+    }
+
     console.log("[ari:media] agent websocket connected", {
         linkedid: session.linkedid,
         agentId: session.activeAgentId,
@@ -287,6 +300,71 @@ function attachAgentWebSocket(linkedid, ws, options = {}) {
     });
 
     return true;
+}
+
+function activateAgentOwner(idOrLinkedid, options = {}) {
+    const key = String(idOrLinkedid || "").trim();
+    const session = mediaSessionsById.get(key) || mediaSessionsByLinkedId.get(key);
+    const transferId = String(options.transferId || options.transfer_id || "").trim() || null;
+    const humanAgentId = options.agentId || options.agent_id || null;
+
+    if (!session || session.status === "closed") {
+        const error = new Error("ARI media session not found");
+        error.status = 404;
+        throw error;
+    }
+
+    if (session.owner === "agent") {
+        if (
+            humanAgentId &&
+            !(session.agentWs && session.agentWs.readyState === 1) &&
+            String(session.activeAgentId || "") !== String(humanAgentId)
+        ) {
+            refreshAgentWebSocketAccess(session, humanAgentId);
+        }
+
+        return snapshotMediaSession(session);
+    }
+
+    if (session.owner !== "ai") {
+        const error = new Error(`ARI media session is not owned by AI (${session.owner || "unknown"})`);
+        error.status = 409;
+        throw error;
+    }
+
+    const aiAgentId = session.aiAgentId;
+
+    clearAsteriskAudioQueue(session.id, "ai_to_human_transfer");
+    session.owner = "agent";
+    session.activeAgentId = humanAgentId;
+    session.aiAgentId = null;
+    session.lastTransferId = transferId;
+    session.onAsteriskPcm48 = null;
+    session.onClose = null;
+    session.status = "agent_waiting";
+    session.updatedAt = new Date().toISOString();
+    refreshAgentWebSocketAccess(session, humanAgentId);
+
+    if (session.recording) {
+        session.recording.addParticipantTransition({
+            transfer_id: transferId,
+            from_type: "ai",
+            from_id: aiAgentId,
+            to_type: "human",
+            to_id: humanAgentId,
+        });
+        session.recording.agentId = humanAgentId;
+    }
+
+    console.log("[ari:media] media owner transferred from AI to human", {
+        linkedid: session.linkedid,
+        transferId,
+        fromAiAgentId: aiAgentId,
+        humanAgentId,
+        mediaSessionId: session.id,
+    });
+
+    return snapshotMediaSession(session);
 }
 
 function activateAiOwner(idOrLinkedid, options = {}) {
@@ -365,8 +443,11 @@ function activateAiOwner(idOrLinkedid, options = {}) {
 
 function createMediaSession(linkedid, ariSession, options = {}) {
     const id = crypto.randomUUID();
-    const wsKey = crypto.randomBytes(24).toString("hex");
-    const path = `/api/ari/calls/${encodeURIComponent(linkedid)}/agent-ws?key=${encodeURIComponent(wsKey)}${options.agentId ? `&agent_id=${encodeURIComponent(options.agentId)}` : ""}`;
+    const startsWithAi = options.owner === "ai";
+    const agentAccess = createAgentWebSocketAccess(
+        linkedid,
+        startsWithAi ? null : options.agentId
+    );
     const now = new Date().toISOString();
 
     return {
@@ -390,12 +471,12 @@ function createMediaSession(linkedid, ariSession, options = {}) {
         rtpPacketsSent: 0,
         agentFramesReceived: 0,
         browserFramesSent: 0,
-        wsKey,
-        agentWebSocketPath: path,
-        agentWebSocketUrl: publicWebSocketUrl(path),
+        wsKey: agentAccess.key,
+        agentWebSocketPath: agentAccess.path,
+        agentWebSocketUrl: agentAccess.url,
         agentWs: null,
-        activeAgentId: options.agentId || null,
-        aiAgentId: null,
+        activeAgentId: startsWithAi ? null : options.agentId || null,
+        aiAgentId: startsWithAi ? options.agentId || null : null,
         lastTransferId: null,
         lastError: null,
         onAsteriskPcm48: typeof options.onAsteriskPcm48 === "function"
@@ -744,6 +825,27 @@ function publicWebSocketUrl(path) {
     return `${base}${path}`;
 }
 
+function createAgentWebSocketAccess(linkedid, agentId = null) {
+    const key = crypto.randomBytes(24).toString("hex");
+    const path = `/api/ari/calls/${encodeURIComponent(linkedid)}/agent-ws?key=${encodeURIComponent(key)}${agentId ? `&agent_id=${encodeURIComponent(agentId)}` : ""}`;
+
+    return {
+        key,
+        path,
+        url: publicWebSocketUrl(path),
+    };
+}
+
+function refreshAgentWebSocketAccess(session, agentId = null) {
+    const access = createAgentWebSocketAccess(session.linkedid, agentId);
+
+    session.wsKey = access.key;
+    session.agentWebSocketPath = access.path;
+    session.agentWebSocketUrl = access.url;
+    session.activeAgentId = agentId || null;
+    session.updatedAt = new Date().toISOString();
+}
+
 function ensureMediaFormatSupported() {
     if (String(env.ariExternalMediaFormat || "").toLowerCase() !== "ulaw") {
         const error = new Error("The browser media bridge currently supports ARI_EXTERNAL_MEDIA_FORMAT=ulaw only");
@@ -758,6 +860,7 @@ module.exports = {
     listMediaSessions,
     closeMediaSession,
     attachAgentWebSocket,
+    activateAgentOwner,
     activateAiOwner,
     sendPcm48ToAsterisk,
     clearAsteriskAudioQueue,
