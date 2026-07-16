@@ -6,6 +6,7 @@ const morgan = require("morgan");
 
 const env = require("./config/env");
 const routes = require("./routes/index.routes");
+const audioRoutes = require("./modules/audio/audio.routes");
 const errorMiddleware = require("./middlewares/error.middleware");
 
 const app = express();
@@ -22,6 +23,7 @@ app.use(morgan("dev", {
     skip: (req) => req.path === "/api/health",
 }));
 
+app.use("/api/audio", audioRoutes);
 app.use("/api", routes);
 
 app.use((req, res) => {

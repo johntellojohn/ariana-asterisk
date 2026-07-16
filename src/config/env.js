@@ -30,10 +30,13 @@ const laravelTrunkEventsPath =
     process.env.PBX_LARAVEL_EVENTS_PATH ||
     "/api/trunk-calls/events";
 
+const path = require("path");
+
 const env = {
     nodeEnv: process.env.NODE_ENV || "development",
     port: toNumber(process.env.PORT, 3002),
     appName: process.env.APP_NAME || "Ariana Asterisk Gateway",
+    buildVersion: process.env.APP_BUILD_VERSION || "ari-ai-trunk-v1",
     publicBaseUrl: process.env.PUBLIC_BASE_URL || "",
     corsOrigins: toList(process.env.CORS_ORIGINS, ["*"]),
     logLevel: process.env.LOG_LEVEL || "info",
@@ -45,6 +48,10 @@ const env = {
 
     laravelApiUrl: process.env.LARAVEL_API_URL || "http://localhost",
     laravelApiToken: process.env.LARAVEL_API_TOKEN || "",
+    laravelVoiceToolsToken:
+        process.env.LARAVEL_VOICE_TOOLS_TOKEN ||
+        process.env.LARAVEL_API_TOKEN ||
+        "",
     laravelTenantDatabase:
         process.env.LARAVEL_TENANT_DATABASE ||
         process.env.LARAVEL_DATABASE ||
@@ -60,6 +67,42 @@ const env = {
         process.env.LARAVEL_CALLBACK_TIMEOUT_MS,
         30000
     ),
+
+    openaiApiKey: process.env.OPENAI_API_KEY || "",
+    openaiSttModel: process.env.OPENAI_STT_MODEL || "gpt-4o-mini-transcribe",
+    openaiAnalysisModel: process.env.OPENAI_ANALYSIS_MODEL || "gpt-4o-mini",
+    openaiRealtimeModel: process.env.OPENAI_REALTIME_MODEL || "gpt-realtime",
+    openaiRealtimeVoice: process.env.OPENAI_REALTIME_VOICE || "marin",
+    openaiRealtimeTranscriptionModel:
+        process.env.OPENAI_REALTIME_TRANSCRIPTION_MODEL || "gpt-4o-mini-transcribe",
+    trunkAiEnabled: toBoolean(process.env.TRUNK_AI_ENABLED, true),
+    trunkAiLanguage: process.env.TRUNK_AI_LANGUAGE || "es",
+    trunkAiRealtimeConnectTimeoutMs: toNumber(process.env.TRUNK_AI_REALTIME_CONNECT_TIMEOUT_MS, 10000),
+    trunkAiRealtimeToolTimeoutMs: toNumber(process.env.TRUNK_AI_REALTIME_TOOL_TIMEOUT_MS, 12000),
+    trunkAiInputSampleRate: toNumber(process.env.TRUNK_AI_INPUT_SAMPLE_RATE, 24000),
+    trunkAiOutputSampleRate: toNumber(process.env.TRUNK_AI_OUTPUT_SAMPLE_RATE, 24000),
+    trunkAiVadThreshold: toNumber(process.env.TRUNK_AI_VAD_THRESHOLD, 0.65),
+    trunkAiTurnSilenceMs: toNumber(process.env.TRUNK_AI_TURN_SILENCE_MS, 500),
+    trunkAiInterruptionDebounceMs: toNumber(process.env.TRUNK_AI_INTERRUPTION_DEBOUNCE_MS, 300),
+    trunkAiInterruptionRmsThreshold: toNumber(process.env.TRUNK_AI_INTERRUPTION_RMS_THRESHOLD, 0.02),
+    trunkAiInterruptionMinSpeechMs: toNumber(process.env.TRUNK_AI_INTERRUPTION_MIN_SPEECH_MS, 250),
+    trunkAiInterruptionWindowMs: toNumber(process.env.TRUNK_AI_INTERRUPTION_WINDOW_MS, 700),
+    trunkAiDisconnectToneEnabled: toBoolean(process.env.TRUNK_AI_DISCONNECT_TONE_ENABLED, true),
+    trunkAiDisconnectToneMinMs: toNumber(process.env.TRUNK_AI_DISCONNECT_TONE_MIN_MS, 1800),
+    trunkAiDisconnectToneSuppressMs: toNumber(process.env.TRUNK_AI_DISCONNECT_TONE_SUPPRESS_MS, 700),
+    trunkAiDisconnectToneRmsThreshold: toNumber(process.env.TRUNK_AI_DISCONNECT_TONE_RMS_THRESHOLD, 0.012),
+    trunkAiDisconnectToneRatioThreshold: toNumber(process.env.TRUNK_AI_DISCONNECT_TONE_RATIO_THRESHOLD, 0.18),
+    callAudioLanguage: process.env.CALL_AUDIO_LANGUAGE || "es",
+    callRecordingEnabled: toBoolean(process.env.CALL_RECORDING_ENABLED, true),
+    callRecordingTranscribe: toBoolean(process.env.CALL_RECORDING_TRANSCRIBE, true),
+    callRecordingAnalyze: toBoolean(process.env.CALL_RECORDING_ANALYZE, true),
+    callCallbackTimeoutMs: toNumber(process.env.CALL_CALLBACK_TIMEOUT_MS, 30000),
+    maxAudioUploadMb: toNumber(process.env.MAX_AUDIO_UPLOAD_MB, 25),
+    tmpDir: process.env.TMP_DIR || path.join(process.cwd(), "tmp"),
+    audioUploadDir:
+        process.env.AUDIO_UPLOAD_DIR || path.join(process.cwd(), "tmp", "uploads"),
+    recordingOutputDir:
+        process.env.RECORDING_OUTPUT_DIR || path.join(process.cwd(), "tmp", "recordings"),
 
     pbxAmiEnabled: toBoolean(process.env.PBX_AMI_ENABLED, false),
     pbxAmiHost: process.env.PBX_AMI_HOST || "127.0.0.1",
@@ -120,6 +163,7 @@ const env = {
     ariStasisExtension: process.env.ARI_STASIS_EXTENSION || "s",
     ariStasisPriority: toNumber(process.env.ARI_STASIS_PRIORITY, 1),
     ariStasisWaitMs: toNumber(process.env.ARI_STASIS_WAIT_MS, 5000),
+    ariBridgeWaitMs: toNumber(process.env.ARI_BRIDGE_WAIT_MS, 10000),
     ariExternalMediaHost: process.env.ARI_EXTERNAL_MEDIA_HOST || "127.0.0.1",
     ariExternalMediaBindHost: process.env.ARI_EXTERNAL_MEDIA_BIND_HOST || "0.0.0.0",
     ariExternalMediaPortStart: toNumber(process.env.ARI_EXTERNAL_MEDIA_PORT_START, 46000),

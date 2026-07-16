@@ -5,7 +5,11 @@ const { attachAriWebSocketServer } = require("./modules/ari/ari.websocket");
 const pbxService = require("./modules/pbx/pbx.service");
 
 const server = app.listen(env.port, () => {
-    console.log(`${env.appName} running on port ${env.port}`);
+    console.log(`${env.appName} running on port ${env.port}`, {
+        buildVersion: env.buildVersion,
+        ariBridgeWaitMs: env.ariBridgeWaitMs,
+        trunkAiEnabled: env.trunkAiEnabled,
+    });
 });
 
 pbxService.start();

@@ -4,6 +4,7 @@ const dgram = require("dgram");
 const env = require("../../config/env");
 const ariService = require("./ari.service");
 const pbxService = require("../pbx/pbx.service");
+const { CallRecording } = require("../calls/call-recording");
 const {
     parseRtpPacket,
     buildRtpPacket,
@@ -49,6 +50,25 @@ async function startMediaSessionByLinkedId(linkedid, options = {}) {
     const existing = mediaSessionsByLinkedId.get(targetLinkedid);
 
     if (existing && existing.status !== "closed") {
+        if (
+            options.owner &&
+            existing.owner &&
+            existing.owner !== options.owner
+        ) {
+            const error = new Error(`ARI media session already owned by ${existing.owner}`);
+            error.status = 409;
+            throw error;
+        }
+
+        if (
+            options.owner === "agent" &&
+            options.agentId &&
+            !(existing.agentWs && existing.agentWs.readyState === 1) &&
+            String(existing.activeAgentId || "") !== String(options.agentId)
+        ) {
+            refreshAgentWebSocketAccess(existing, options.agentId);
+        }
+
         return snapshotMediaSession(existing);
     }
 
@@ -164,6 +184,13 @@ async function closeMediaSession(idOrLinkedid, reason = "closed") {
         session.rtpSocket = null;
     }
 
+    if (session.rtpSendTimer) {
+        clearInterval(session.rtpSendTimer);
+        session.rtpSendTimer = null;
+    }
+
+    session.rtpSendQueue = [];
+
     if (session.externalChannelId) {
         await ariService.ariRequest("delete", `/channels/${encodeURIComponent(session.externalChannelId)}`)
             .catch((error) => {
@@ -176,8 +203,36 @@ async function closeMediaSession(idOrLinkedid, reason = "closed") {
             });
     }
 
-    mediaSessionsById.delete(session.id);
-    mediaSessionsByLinkedId.delete(session.linkedid);
+    if (session.recording) {
+        const recording = session.recording;
+        session.recording = null;
+
+        await recording.finalize(reason).catch((error) => {
+            console.warn("[ari:media] recording finalize failed", {
+                linkedid: session.linkedid,
+                message: error.message,
+            });
+        });
+    }
+
+    if (mediaSessionsById.get(session.id) === session) {
+        mediaSessionsById.delete(session.id);
+    }
+
+    if (mediaSessionsByLinkedId.get(session.linkedid) === session) {
+        mediaSessionsByLinkedId.delete(session.linkedid);
+    }
+
+    if (typeof session.onClose === "function") {
+        try {
+            session.onClose(snapshotMediaSession(session));
+        } catch (error) {
+            console.warn("[ari:media] close callback failed", {
+                linkedid: session.linkedid,
+                message: error.message,
+            });
+        }
+    }
 
     return snapshotMediaSession(session);
 }
@@ -204,13 +259,17 @@ function attachAgentWebSocket(linkedid, ws, options = {}) {
     session.status = "agent_connected";
     session.updatedAt = new Date().toISOString();
 
+    if (session.recording) {
+        session.recording.agentId = session.activeAgentId;
+    }
+
     console.log("[ari:media] agent websocket connected", {
         linkedid: session.linkedid,
         agentId: session.activeAgentId,
     });
 
     ws.on("message", (message, isBinary) => {
-        if (!isBinary || session.status === "closed") {
+        if (!isBinary || session.status === "closed" || session.agentWs !== ws) {
             return;
         }
 
@@ -243,15 +302,158 @@ function attachAgentWebSocket(linkedid, ws, options = {}) {
     return true;
 }
 
+function activateAgentOwner(idOrLinkedid, options = {}) {
+    const key = String(idOrLinkedid || "").trim();
+    const session = mediaSessionsById.get(key) || mediaSessionsByLinkedId.get(key);
+    const transferId = String(options.transferId || options.transfer_id || "").trim() || null;
+    const humanAgentId = options.agentId || options.agent_id || null;
+
+    if (!session || session.status === "closed") {
+        const error = new Error("ARI media session not found");
+        error.status = 404;
+        throw error;
+    }
+
+    if (session.owner === "agent") {
+        if (
+            humanAgentId &&
+            !(session.agentWs && session.agentWs.readyState === 1) &&
+            String(session.activeAgentId || "") !== String(humanAgentId)
+        ) {
+            refreshAgentWebSocketAccess(session, humanAgentId);
+        }
+
+        return snapshotMediaSession(session);
+    }
+
+    if (session.owner !== "ai") {
+        const error = new Error(`ARI media session is not owned by AI (${session.owner || "unknown"})`);
+        error.status = 409;
+        throw error;
+    }
+
+    const aiAgentId = session.aiAgentId;
+
+    clearAsteriskAudioQueue(session.id, "ai_to_human_transfer");
+    session.owner = "agent";
+    session.activeAgentId = humanAgentId;
+    session.aiAgentId = null;
+    session.lastTransferId = transferId;
+    session.onAsteriskPcm48 = null;
+    session.onClose = null;
+    session.status = "agent_waiting";
+    session.updatedAt = new Date().toISOString();
+    refreshAgentWebSocketAccess(session, humanAgentId);
+
+    if (session.recording) {
+        session.recording.addParticipantTransition({
+            transfer_id: transferId,
+            from_type: "ai",
+            from_id: aiAgentId,
+            to_type: "human",
+            to_id: humanAgentId,
+        });
+        session.recording.agentId = humanAgentId;
+    }
+
+    console.log("[ari:media] media owner transferred from AI to human", {
+        linkedid: session.linkedid,
+        transferId,
+        fromAiAgentId: aiAgentId,
+        humanAgentId,
+        mediaSessionId: session.id,
+    });
+
+    return snapshotMediaSession(session);
+}
+
+function activateAiOwner(idOrLinkedid, options = {}) {
+    const key = String(idOrLinkedid || "").trim();
+    const session = mediaSessionsById.get(key) || mediaSessionsByLinkedId.get(key);
+    const transferId = String(options.transferId || options.transfer_id || "").trim();
+
+    if (!transferId) {
+        const error = new Error("transfer_id is required");
+        error.status = 422;
+        throw error;
+    }
+
+    if (!session || session.status === "closed") {
+        const error = new Error("ARI media session not found");
+        error.status = 404;
+        throw error;
+    }
+
+    if (session.owner === "ai" && session.lastTransferId === transferId) {
+        return snapshotMediaSession(session);
+    }
+
+    if (session.owner !== "agent") {
+        const error = new Error(`ARI media session is not owned by a human agent (${session.owner || "unknown"})`);
+        error.status = 409;
+        throw error;
+    }
+
+    const humanWs = session.agentWs;
+    const humanAgentId = session.activeAgentId;
+
+    if (!humanWs || humanWs.readyState !== 1) {
+        const error = new Error("Human agent WebSocket is not connected");
+        error.status = 409;
+        throw error;
+    }
+
+    clearAsteriskAudioQueue(session.id, "human_to_ai_transfer");
+    session.owner = "ai";
+    session.aiAgentId = options.agentId || options.agent_id || null;
+    session.lastTransferId = transferId;
+    session.onAsteriskPcm48 = typeof options.onAsteriskPcm48 === "function"
+        ? options.onAsteriskPcm48
+        : null;
+    session.onClose = typeof options.onClose === "function"
+        ? options.onClose
+        : null;
+    session.agentWs = null;
+    session.activeAgentId = null;
+    session.status = "ai_connected";
+    session.updatedAt = new Date().toISOString();
+
+    if (session.recording) {
+        session.recording.addParticipantTransition({
+            transfer_id: transferId,
+            from_type: "human",
+            from_id: humanAgentId,
+            to_type: "ai",
+            to_id: session.aiAgentId,
+        });
+        session.recording.agentId = session.aiAgentId;
+    }
+
+    humanWs.close(1000, "transferred_to_ai");
+
+    console.log("[ari:media] media owner transferred from human to AI", {
+        linkedid: session.linkedid,
+        transferId,
+        fromAgentId: humanAgentId,
+        aiAgentId: session.aiAgentId,
+    });
+
+    return snapshotMediaSession(session);
+}
+
 function createMediaSession(linkedid, ariSession, options = {}) {
     const id = crypto.randomUUID();
-    const wsKey = crypto.randomBytes(24).toString("hex");
-    const path = `/api/ari/calls/${encodeURIComponent(linkedid)}/agent-ws?key=${encodeURIComponent(wsKey)}${options.agentId ? `&agent_id=${encodeURIComponent(options.agentId)}` : ""}`;
+    const startsWithAi = options.owner === "ai";
+    const agentAccess = createAgentWebSocketAccess(
+        linkedid,
+        startsWithAi ? null : options.agentId
+    );
     const now = new Date().toISOString();
 
     return {
         id,
         linkedid,
+        owner: options.owner || "agent",
         channelId: ariSession.channelId,
         bridgeId: ariSession.bridgeId,
         status: "starting",
@@ -269,12 +471,20 @@ function createMediaSession(linkedid, ariSession, options = {}) {
         rtpPacketsSent: 0,
         agentFramesReceived: 0,
         browserFramesSent: 0,
-        wsKey,
-        agentWebSocketPath: path,
-        agentWebSocketUrl: publicWebSocketUrl(path),
+        wsKey: agentAccess.key,
+        agentWebSocketPath: agentAccess.path,
+        agentWebSocketUrl: agentAccess.url,
         agentWs: null,
-        activeAgentId: options.agentId || null,
+        activeAgentId: startsWithAi ? null : options.agentId || null,
+        aiAgentId: startsWithAi ? options.agentId || null : null,
+        lastTransferId: null,
         lastError: null,
+        onAsteriskPcm48: typeof options.onAsteriskPcm48 === "function"
+            ? options.onAsteriskPcm48
+            : null,
+        onClose: typeof options.onClose === "function"
+            ? options.onClose
+            : null,
         codecState: {
             downsampleRemainder: new Int16Array(0),
             ulawRemainder: Buffer.alloc(0),
@@ -284,6 +494,22 @@ function createMediaSession(linkedid, ariSession, options = {}) {
             timestamp: crypto.randomInt(0, 0xffffffff),
             ssrc: crypto.randomInt(1, 0xffffffff),
         },
+        rtpSendQueue: [],
+        rtpSendTimer: null,
+        recording: new CallRecording({
+            sessionId: id,
+            callId: linkedid,
+            linkedid,
+            tenant: options.tenant || null,
+            agentId: options.agentId || null,
+            mode: options.owner === "ai" ? "trunk_ai" : "trunk_human",
+            logger: (message, data) => {
+                console.warn(`[ari:media] ${message}`, {
+                    linkedid,
+                    ...data,
+                });
+            },
+        }),
     };
 }
 
@@ -403,12 +629,36 @@ function handleRtpPacket(session, packet) {
     session.rtpPacketsReceived += 1;
     session.updatedAt = new Date().toISOString();
 
+    const pcm48 = decodeUlawPayloadToPcm48(rtp.payload);
+
+    if (session.recording) {
+        session.recording.recordCustomerPcm(pcm48, {
+            sampleRate: 48000,
+            channelCount: 1,
+        });
+    }
+
+    if (typeof session.onAsteriskPcm48 === "function") {
+        try {
+            session.onAsteriskPcm48(pcm48, {
+                linkedid: session.linkedid,
+                packet: rtp,
+            });
+        } catch (error) {
+            session.lastError = error.message;
+            console.warn("[ari:media] RTP audio callback failed", {
+                linkedid: session.linkedid,
+                message: error.message,
+            });
+        }
+    }
+
     if (!session.agentWs || session.agentWs.readyState !== 1) {
         return;
     }
 
     try {
-        session.agentWs.send(decodeUlawPayloadToPcm48(rtp.payload), { binary: true });
+        session.agentWs.send(pcm48, { binary: true });
         session.browserFramesSent += 1;
     } catch (error) {
         session.lastError = error.message;
@@ -420,21 +670,57 @@ function sendAgentAudioToAsterisk(session, pcm48Buffer) {
         return;
     }
 
+    if (session.recording) {
+        session.recording.recordAgentPcm(pcm48Buffer, {
+            sampleRate: 48000,
+            channelCount: 1,
+        });
+    }
+
     const frameSamples = Math.max(1, Math.round(8000 * env.ariExternalMediaFrameMs / 1000));
     const payloads = pcm48BufferToUlawPayloads(pcm48Buffer, session.codecState, frameSamples);
 
-    for (const payload of payloads) {
+    if (payloads.length > 0) {
+        session.rtpSendQueue.push(...payloads);
+        session.agentFramesReceived += 1;
+        session.updatedAt = new Date().toISOString();
+        startRtpSendTimer(session);
+    }
+}
+
+function startRtpSendTimer(session) {
+    if (session.rtpSendTimer) {
+        return;
+    }
+
+    const intervalMs = Math.max(1, env.ariExternalMediaFrameMs);
+
+    session.rtpSendTimer = setInterval(() => {
+        if (session.status === "closed" || !session.rtpSocket || !session.remoteRtp) {
+            clearInterval(session.rtpSendTimer);
+            session.rtpSendTimer = null;
+            return;
+        }
+
+        const payload = session.rtpSendQueue.shift();
+
+        if (!payload) {
+            clearInterval(session.rtpSendTimer);
+            session.rtpSendTimer = null;
+            return;
+        }
+
         const packet = buildRtpPacket(payload, session.rtpSendState, {
             payloadType: env.ariExternalMediaPayloadType,
         });
 
         session.rtpSocket.send(packet, session.remoteRtp.port, session.remoteRtp.address);
         session.rtpPacketsSent += 1;
-    }
-
-    if (payloads.length > 0) {
-        session.agentFramesReceived += 1;
         session.updatedAt = new Date().toISOString();
+    }, intervalMs);
+
+    if (typeof session.rtpSendTimer.unref === "function") {
+        session.rtpSendTimer.unref();
     }
 }
 
@@ -442,6 +728,7 @@ function snapshotMediaSession(session) {
     return {
         id: session.id,
         linkedid: session.linkedid,
+        owner: session.owner,
         channelId: session.channelId,
         bridgeId: session.bridgeId,
         status: session.status,
@@ -456,15 +743,64 @@ function snapshotMediaSession(session) {
         remoteRtp: session.remoteRtp ? { ...session.remoteRtp } : null,
         rtpPacketsReceived: session.rtpPacketsReceived,
         rtpPacketsSent: session.rtpPacketsSent,
+        rtpSendQueueLength: session.rtpSendQueue ? session.rtpSendQueue.length : 0,
         agentFramesReceived: session.agentFramesReceived,
         browserFramesSent: session.browserFramesSent,
         activeAgentId: session.activeAgentId,
+        aiAgentId: session.aiAgentId || null,
+        lastTransferId: session.lastTransferId || null,
         agentWebSocketUrl: session.agentWebSocketUrl,
         agentWebSocketPath: session.agentWebSocketPath,
         hasAgentWebSocket: Boolean(session.agentWs && session.agentWs.readyState === 1),
         format: env.ariExternalMediaFormat,
         lastError: session.lastError,
     };
+}
+
+function sendPcm48ToAsterisk(idOrLinkedid, pcm48Buffer) {
+    const key = String(idOrLinkedid || "").trim();
+    const session = mediaSessionsById.get(key) || mediaSessionsByLinkedId.get(key);
+
+    if (!session || session.status === "closed") {
+        return false;
+    }
+
+    sendAgentAudioToAsterisk(session, pcm48Buffer);
+
+    return true;
+}
+
+function clearAsteriskAudioQueue(idOrLinkedid, reason = "cleared") {
+    const key = String(idOrLinkedid || "").trim();
+    const session = mediaSessionsById.get(key) || mediaSessionsByLinkedId.get(key);
+
+    if (!session || session.status === "closed") {
+        return 0;
+    }
+
+    const cleared = session.rtpSendQueue ? session.rtpSendQueue.length : 0;
+
+    if (session.rtpSendTimer) {
+        clearInterval(session.rtpSendTimer);
+        session.rtpSendTimer = null;
+    }
+
+    session.rtpSendQueue = [];
+    session.codecState = {
+        downsampleRemainder: new Int16Array(0),
+        ulawRemainder: Buffer.alloc(0),
+    };
+    session.updatedAt = new Date().toISOString();
+
+    if (cleared > 0) {
+        console.log("[ari:media] RTP output queue cleared", {
+            linkedid: session.linkedid,
+            reason,
+            cleared,
+        });
+    }
+
+    return cleared;
 }
 
 function publicWebSocketUrl(path) {
@@ -489,6 +825,27 @@ function publicWebSocketUrl(path) {
     return `${base}${path}`;
 }
 
+function createAgentWebSocketAccess(linkedid, agentId = null) {
+    const key = crypto.randomBytes(24).toString("hex");
+    const path = `/api/ari/calls/${encodeURIComponent(linkedid)}/agent-ws?key=${encodeURIComponent(key)}${agentId ? `&agent_id=${encodeURIComponent(agentId)}` : ""}`;
+
+    return {
+        key,
+        path,
+        url: publicWebSocketUrl(path),
+    };
+}
+
+function refreshAgentWebSocketAccess(session, agentId = null) {
+    const access = createAgentWebSocketAccess(session.linkedid, agentId);
+
+    session.wsKey = access.key;
+    session.agentWebSocketPath = access.path;
+    session.agentWebSocketUrl = access.url;
+    session.activeAgentId = agentId || null;
+    session.updatedAt = new Date().toISOString();
+}
+
 function ensureMediaFormatSupported() {
     if (String(env.ariExternalMediaFormat || "").toLowerCase() !== "ulaw") {
         const error = new Error("The browser media bridge currently supports ARI_EXTERNAL_MEDIA_FORMAT=ulaw only");
@@ -503,4 +860,18 @@ module.exports = {
     listMediaSessions,
     closeMediaSession,
     attachAgentWebSocket,
+    activateAgentOwner,
+    activateAiOwner,
+    sendPcm48ToAsterisk,
+    clearAsteriskAudioQueue,
+    __test: {
+        registerMediaSession(session) {
+            mediaSessionsById.set(session.id, session);
+            mediaSessionsByLinkedId.set(session.linkedid, session);
+        },
+        resetMediaSessions() {
+            mediaSessionsById.clear();
+            mediaSessionsByLinkedId.clear();
+        },
+    },
 };

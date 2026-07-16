@@ -1,5 +1,6 @@
 const ariService = require("./ari.service");
 const ariMediaService = require("./ari-media.service");
+const ariAiSessionService = require("./ari-ai-session.service");
 
 function health(req, res) {
     res.json({
@@ -30,6 +31,16 @@ function sessions(req, res) {
 
 function mediaSessions(req, res) {
     const items = ariMediaService.listMediaSessions();
+
+    res.json({
+        ok: true,
+        total: items.length,
+        data: items,
+    });
+}
+
+function aiSessions(req, res) {
+    const items = ariAiSessionService.listAiSessions();
 
     res.json({
         ok: true,
@@ -191,7 +202,9 @@ async function startCallMediaSession(req, res, next) {
         const session = await ariMediaService.startMediaSessionByLinkedId(
             req.params.linkedid,
             {
+                owner: "agent",
                 agentId: req.body.agent_id || req.body.agentId || null,
+                tenant: req.body.tenant || req.body.database || null,
             }
         );
 
@@ -227,15 +240,126 @@ async function closeCallMediaSession(req, res, next) {
     }
 }
 
+async function startCallAiSession(req, res, next) {
+    console.log("[ari:ai] ai-session request received", {
+        linkedid: req.params.linkedid,
+        agentId: req.body?.agent_id || null,
+        tenant: req.body?.tenant || null,
+        channel: req.body?.channel || null,
+        model: req.body?.realtime?.model || null,
+        voice: req.body?.realtime?.voice || null,
+        language: req.body?.realtime?.language || null,
+        hasInstructions: Boolean(req.body?.realtime?.instructions),
+        instructionsLength: String(req.body?.realtime?.instructions || "").length,
+        hasInitialGreeting: Boolean(String(req.body?.initial_greeting || "").trim()),
+    });
+
+    try {
+        const session = await ariAiSessionService.startAiSessionByLinkedId(
+            req.params.linkedid,
+            req.body || {}
+        );
+
+        console.log("[ari:ai] ai-session request completed", {
+            linkedid: req.params.linkedid,
+            sessionId: session.id,
+            mediaSessionId: session.mediaSessionId,
+            status: session.status,
+            realtimeReady: session.realtimeReady,
+            asteriskAudioReady: session.asteriskAudioReady,
+        });
+
+        res.json({
+            ok: true,
+            data: session,
+        });
+    } catch (error) {
+        console.warn("[ari:ai] ai-session request failed", {
+            linkedid: req.params.linkedid,
+            agentId: req.body?.agent_id || null,
+            status: error.status || null,
+            message: error.message,
+        });
+
+        next(error);
+    }
+}
+
+async function activateCallAiSession(req, res, next) {
+    console.log("[ari:ai] human to AI activation request received", {
+        linkedid: req.params.linkedid,
+        transferId: req.body?.transfer_id || null,
+        agentId: req.body?.agent_id || null,
+        hasHandoffContext: Boolean(String(req.body?.handoff_context || "").trim()),
+    });
+
+    try {
+        const session = await ariAiSessionService.activateAiSessionByLinkedId(
+            req.params.linkedid,
+            req.body || {}
+        );
+
+        res.json({
+            ok: true,
+            data: session,
+        });
+    } catch (error) {
+        console.warn("[ari:ai] human to AI activation failed", {
+            linkedid: req.params.linkedid,
+            transferId: req.body?.transfer_id || null,
+            agentId: req.body?.agent_id || null,
+            status: error.status || null,
+            message: error.message,
+        });
+
+        next(error);
+    }
+}
+
+async function closeCallAiSession(req, res, next) {
+    try {
+        const reason = req.body.reason || "closed_by_api";
+        const humanAnswer = String(reason).match(/^human_agent_(\d+)_answering$/i);
+        const session = await ariAiSessionService.closeAiSession(
+            req.params.linkedid,
+            reason,
+            humanAnswer
+                ? {
+                    handoffToAgent: true,
+                    agentId: Number(humanAnswer[1]),
+                }
+                : {}
+        );
+
+        if (!session) {
+            return res.status(404).json({
+                ok: false,
+                message: "ARI AI session not found",
+            });
+        }
+
+        return res.json({
+            ok: true,
+            data: session,
+        });
+    } catch (error) {
+        next(error);
+    }
+}
+
 module.exports = {
     health,
     events,
     sessions,
     mediaSessions,
+    aiSessions,
     showSession,
     showCall,
     startCallMediaSession,
     closeCallMediaSession,
+    startCallAiSession,
+    activateCallAiSession,
+    closeCallAiSession,
     answerSession,
     answerCall,
     bridgeSession,

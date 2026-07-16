@@ -11,6 +11,7 @@
     "check:ari": "node scripts/check-ari.js",
     "diagnose:call": "node scripts/diagnose-call.js",
     "test:trunk-callback": "node scripts/test-trunk-callback.js",
+    "test:human-to-ai-transfer": "node scripts/test-human-to-ai-transfer.js",
     "docker:up": "docker compose up -d --build",
     "docker:down": "docker compose down",
     "docker:logs": "docker compose logs -f api"
@@ -35,6 +36,7 @@
     "express": "^5.2.1",
     "helmet": "^8.2.0",
     "morgan": "^1.10.1",
+    "openai": "^6.45.0",
     "ws": "^8.18.0"
   },
   "devDependencies": {
