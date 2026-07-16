@@ -27,7 +27,8 @@ function start() {
     if (started) {
         return getStatus();
     }
-
+    
+    // Analisis del servicio
     started = true;
 
     if (!env.ariUsername || !env.ariPassword) {
