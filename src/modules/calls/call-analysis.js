@@ -11,6 +11,7 @@ async function analyzeRecording(recording = {}) {
     if (!env.callRecordingAnalyze || !transcript) {
         return fallback;
     }
+    // Test comentario
 
     try {
         const client = getOpenAIClient();
