@@ -58,8 +58,40 @@ Para que EVA use audio en navegador con ARI, configura el JSON de la integracion
 - `POST /api/pbx/originate/extension`
 - `POST /api/pbx/originate/external`
 - `POST /api/pbx/originate/direct`
+- `GET /api/ari/outbound-calls`
+- `POST /api/ari/outbound-calls`
+- `GET /api/ari/outbound-calls/:outboundCallId`
+- `POST /api/ari/outbound-calls/:outboundCallId/hangup`
 
 Los endpoints `/api/pbx/*` y `/api/ari/*` usan `Authorization: Bearer <ASTERISK_API_TOKEN>`.
+
+## Llamadas salientes troncales
+
+La originacion saliente controlada por EVA queda aislada y apagada por defecto:
+
+```bash
+TRUNK_OUTBOUND_ENABLED=false
+TRUNK_OUTBOUND_RETENTION_MS=3600000
+```
+
+Cuando se habilita para una prueba controlada, `POST /api/ari/outbound-calls`
+origina un canal `Local/{numero}@PBX_ORIGINATE_CONTEXT/n` y reutiliza la ruta
+saliente existente de FreePBX. El canal contestado ejecuta
+`Stasis(ARI_APP_NAME,outbound,{outbound_call_id})`.
+
+Ejemplo:
+
+```bash
+curl -X POST \
+  -H "Authorization: Bearer $ASTERISK_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"phone_number":"0996432301","from_number":"1800-CORE-01","agent_id":15,"device_id":8,"tenant":"base_tenant","mode":"human"}' \
+  http://localhost:366/api/ari/outbound-calls
+```
+
+La respuesta inicial es asincrona y contiene `outbound_call_id`. Los callbacks
+hacia EVA incluyen `direction=OUTBOUND`, `outbound_call_id`, `linkedid`,
+`agent_id`, `device_id`, `customer_id` y `tenant`.
 
 ## ARI
 

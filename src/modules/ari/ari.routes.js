@@ -1,6 +1,7 @@
 const express = require("express");
 
 const ariController = require("./ari.controller");
+const outboundCallController = require("../outbound/outbound-call.controller");
 const requireApiToken = require("../../middlewares/api-token.middleware");
 
 const router = express.Router();
@@ -12,6 +13,10 @@ router.get("/events", ariController.events);
 router.get("/sessions", ariController.sessions);
 router.get("/media-sessions", ariController.mediaSessions);
 router.get("/ai-sessions", ariController.aiSessions);
+router.get("/outbound-calls", outboundCallController.index);
+router.post("/outbound-calls", outboundCallController.create);
+router.get("/outbound-calls/:outboundCallId", outboundCallController.show);
+router.post("/outbound-calls/:outboundCallId/hangup", outboundCallController.hangup);
 router.get("/calls/:linkedid", ariController.showCall);
 router.post("/calls/:linkedid/media-session", ariController.startCallMediaSession);
 router.post("/calls/:linkedid/media-session/close", ariController.closeCallMediaSession);

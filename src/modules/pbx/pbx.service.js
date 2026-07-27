@@ -35,6 +35,9 @@ const callsByLinkedId = new Map();
 const rawEventsByLinkedId = new Map();
 const actionsByLinkedId = new Map();
 const lifecycleEvents = new EventEmitter();
+const eventMetadataResolvers = new Set();
+
+lifecycleEvents.setMaxListeners(50);
 
 function start() {
     if (!env.pbxAmiEnabled) {
@@ -98,6 +101,7 @@ function handleManagerEvent(event) {
     const raw = normalizeRawEvent(event, eventName);
 
     rememberRawEvent(raw);
+    lifecycleEvents.emit("manager-event", raw);
 
     if (shouldLogRawEvent(raw)) {
         console.log("[pbx:event:raw]", raw);
@@ -163,8 +167,12 @@ function normalizeRawEvent(event, eventName = normalizeEventName(event)) {
     return {
         time: new Date().toISOString(),
         event: eventName || event.event || event.Event || "",
+        actionId: event.actionid || event.ActionID || "",
+        response: event.response || event.Response || "",
+        reason: event.reason || event.Reason || "",
         channel: event.channel || event.Channel || "",
         caller: event.calleridnum || event.CallerIDNum || "",
+        callerName: event.calleridname || event.CallerIDName || "",
         destination:
             event.destination ||
             event.Destination ||
@@ -187,6 +195,8 @@ function normalizeRawEvent(event, eventName = normalizeEventName(event)) {
             event.Uniqueid ||
             "",
         uniqueid: event.uniqueid || event.Uniqueid || "",
+        variable: event.variable || event.Variable || "",
+        value: event.value || event.Value || "",
     };
 }
 
@@ -349,6 +359,7 @@ function getStatus() {
         host: env.pbxAmiHost,
         port: env.pbxAmiPort,
         username: env.pbxAmiUsername,
+        outboundEnabled: env.trunkOutboundEnabled,
         lastAmiEventTime,
         lastAmiError,
     };
@@ -846,10 +857,24 @@ function notifyLaravel(event) {
         return;
     }
 
+    const metadata = resolveEventMetadata(event);
+    const callbackEvent = metadata
+        ? {
+            ...event,
+            ...metadata,
+        }
+        : event;
     const summary = event.linkedid ? getCallByLinkedId(event.linkedid) : null;
+    const callbackSummary = metadata
+        ? {
+            ...(summary || {}),
+            ...metadata,
+        }
+        : summary;
     const payload = {
-        event,
-        summary,
+        ...(metadata || {}),
+        event: callbackEvent,
+        summary: callbackSummary,
         source: "ariana-asterisk-pbx",
     };
 
@@ -857,8 +882,10 @@ function notifyLaravel(event) {
         console.log("[pbx:laravel] sending trunk event", {
             linkedid: event.linkedid || null,
             event: event.event || null,
+            direction: metadata?.direction || null,
+            outboundCallId: metadata?.outbound_call_id || null,
             url: `${env.laravelApiUrl.replace(/\/$/, "")}${env.laravelTrunkEventsPath}`,
-            hasSummary: Boolean(summary),
+            hasSummary: Boolean(callbackSummary),
         });
     }
 
@@ -881,6 +908,42 @@ function notifyLaravel(event) {
                 status: error.response?.status,
             });
     });
+}
+
+function resolveEventMetadata(event) {
+    for (const resolver of eventMetadataResolvers) {
+        try {
+            const metadata = resolver(event);
+
+            if (metadata && typeof metadata === "object") {
+                return metadata;
+            }
+        } catch (error) {
+            console.warn("[pbx:event-metadata] resolver failed", {
+                message: error.message,
+                linkedid: event.linkedid || null,
+                event: event.event || null,
+            });
+        }
+    }
+
+    return null;
+}
+
+function registerEventMetadataResolver(resolver) {
+    if (typeof resolver !== "function") {
+        throw new TypeError("PBX event metadata resolver must be a function");
+    }
+
+    eventMetadataResolvers.add(resolver);
+
+    return () => eventMetadataResolvers.delete(resolver);
+}
+
+function onManagerEvent(listener) {
+    lifecycleEvents.on("manager-event", listener);
+
+    return () => lifecycleEvents.off("manager-event", listener);
 }
 
 function notifyRedirectStasisEarlyEnd(event) {
@@ -1032,6 +1095,55 @@ async function originateExtension(fromExtension, toExtension) {
     });
 }
 
+async function originateOutboundApplication({
+    actionId,
+    phoneNumber,
+    application = "Stasis",
+    applicationData = "",
+    variables = {},
+}) {
+    validateRequired({ actionId, phoneNumber, application });
+    validateDialValue("phoneNumber", phoneNumber, /^\+?[0-9]{3,20}$/);
+    validateDialValue("context", env.pbxOriginateContext, /^[A-Za-z0-9_.-]+$/);
+    validateDialValue("application", application, /^[A-Za-z0-9_.-]+$/);
+    validateManagerValue("applicationData", applicationData);
+
+    const safeVariables = Object.fromEntries(
+        Object.entries(variables).map(([name, value]) => {
+            validateDialValue("variable name", name, /^[A-Za-z_][A-Za-z0-9_]*$/);
+            validateManagerValue(`variable ${name}`, value);
+
+            return [name, String(value)];
+        })
+    );
+    const channel = `Local/${phoneNumber}@${env.pbxOriginateContext}/n`;
+
+    console.log("[pbx:action] originate outbound application requested", {
+        actionId,
+        phoneNumber,
+        channel,
+        application,
+    });
+
+    const response = await originate({
+        actionid: actionId,
+        Channel: channel,
+        Application: application,
+        Data: applicationData,
+        Variable: safeVariables,
+        CallerID: callerId(phoneNumber),
+        Timeout: env.pbxOriginateTimeoutMs,
+        Async: true,
+    });
+
+    return {
+        actionId,
+        channel,
+        context: env.pbxOriginateContext,
+        response,
+    };
+}
+
 async function originateExternal(fromExtension, phoneNumber) {
     validateRequired({ fromExtension, phoneNumber });
     console.log("[pbx:action] originate external requested", {
@@ -1081,6 +1193,22 @@ function validateRequired(fields) {
     }
 }
 
+function validateDialValue(field, value, pattern) {
+    if (!pattern.test(String(value || ""))) {
+        const error = new Error(`${field} has an invalid format`);
+        error.status = 422;
+        throw error;
+    }
+}
+
+function validateManagerValue(field, value) {
+    if (/[\r\n]/.test(String(value || ""))) {
+        const error = new Error(`${field} contains invalid control characters`);
+        error.status = 422;
+        throw error;
+    }
+}
+
 function originate(action) {
     ensureReady();
     console.log("[pbx:ami-action] Originate", action);
@@ -1100,6 +1228,13 @@ function hangupChannel(channel, reason) {
         Cause: env.pbxHangupCause,
         Reason: reason,
     });
+}
+
+function hangupChannelByName(channel, reason = "outbound_cancelled") {
+    validateRequired({ channel });
+    validateManagerValue("channel", channel);
+
+    return hangupChannel(channel, reason);
 }
 
 function redirectChannel(channel, target) {
@@ -1232,7 +1367,11 @@ module.exports = {
     connectCallToExtension,
     redirectCallToStasis,
     onRedirectStasisEarlyEnd,
+    onManagerEvent,
+    registerEventMetadataResolver,
     originateExtension,
     originateExternal,
     originateDirect,
+    originateOutboundApplication,
+    hangupChannelByName,
 };

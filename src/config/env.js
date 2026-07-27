@@ -122,6 +122,11 @@ const env = {
     pbxCallerIdPrefix: process.env.PBX_CALLER_ID_PREFIX || "Ariana",
     pbxDirectTrunkEndpoint: process.env.PBX_DIRECT_TRUNK_ENDPOINT || "fxo",
     pbxHangupCause: toNumber(process.env.PBX_HANGUP_CAUSE, 16),
+    trunkOutboundEnabled: toBoolean(process.env.TRUNK_OUTBOUND_ENABLED, false),
+    trunkOutboundRetentionMs: toNumber(
+        process.env.TRUNK_OUTBOUND_RETENTION_MS,
+        3600000
+    ),
 
     ariEnabled: toBoolean(
         process.env.ARI_ENABLED ||
