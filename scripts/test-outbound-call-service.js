@@ -153,6 +153,8 @@ async function run() {
 
     assert.strictEqual(earlyMetadata.direction, "OUTBOUND");
     assert.strictEqual(earlyMetadata.device_id, 8);
+    assert.strictEqual(earlyMetadata.phone_number, "0996432301");
+    assert.strictEqual(earlyMetadata.from_number, "1800-CORE-01");
 
     pbx.emit({
         event: "varset",

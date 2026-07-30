@@ -871,6 +871,19 @@ function notifyLaravel(event) {
             ...metadata,
         }
         : summary;
+
+    if (!metadata && !event.linkedid && !callbackSummary) {
+        if (env.pbxLogLaravelCallbacks) {
+            console.log("[pbx:laravel] unidentified event skipped", {
+                event: event.event || null,
+                channel: event.channel || null,
+                destChannel: event.destChannel || null,
+            });
+        }
+
+        return;
+    }
+
     const payload = {
         ...(metadata || {}),
         event: callbackEvent,
@@ -1052,10 +1065,10 @@ function isSecondaryRedirectLifecycleEvent(event) {
 }
 
 function isExternalMediaLifecycleEvent(event) {
-    const channel = String(event.channel || "");
-    const eventName = String(event.event || "").toLowerCase();
+    const channels = [event.channel, event.destChannel]
+        .map((value) => String(value || ""));
 
-    return channel.startsWith("UnicastRTP/") && ["bridgeleave", "hangup"].includes(eventName);
+    return channels.some((channel) => channel.startsWith("UnicastRTP/"));
 }
 
 function isPrimaryRedirectLifecycleEnd(event, call) {

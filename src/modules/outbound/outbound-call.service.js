@@ -169,6 +169,8 @@ class OutboundCallService {
             direction: "OUTBOUND",
             outbound_call_id: call.outboundCallId,
             external_call_id: call.linkedid || call.outboundCallId,
+            phone_number: call.phoneNumber,
+            from_number: call.fromNumber || undefined,
             agent_id: call.agentId,
             device_id: call.deviceId,
             customer_id: call.customerId || null,
