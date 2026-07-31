@@ -467,9 +467,11 @@ function createMediaSession(linkedid, ariSession, options = {}) {
         rtpBindHost: env.ariExternalMediaBindHost,
         rtpPort: null,
         remoteRtp: null,
+        remoteRtpSource: null,
         rtpPacketsReceived: 0,
         rtpPacketsSent: 0,
         agentFramesReceived: 0,
+        agentFramesDroppedNoRtp: 0,
         browserFramesSent: 0,
         wsKey: agentAccess.key,
         agentWebSocketPath: agentAccess.path,
@@ -518,10 +520,20 @@ async function bindRtpSocket(session) {
     session.rtpSocket = socket;
 
     socket.on("message", (packet, rinfo) => {
+        const firstPacket = session.rtpPacketsReceived === 0;
         session.remoteRtp = {
             address: rinfo.address,
             port: rinfo.port,
         };
+        session.remoteRtpSource = "inbound_packet";
+
+        if (firstPacket) {
+            console.log("[ari:media] first RTP packet received from Asterisk", {
+                linkedid: session.linkedid,
+                address: rinfo.address,
+                port: rinfo.port,
+            });
+        }
 
         handleRtpPacket(session, packet);
     });
@@ -604,6 +616,15 @@ async function createExternalMediaChannel(session) {
         throw error;
     }
 
+    await resolveAsteriskRtpDestination(session).catch((error) => {
+        session.lastError = error.message;
+        console.warn("[ari:media] Asterisk RTP destination not available; waiting for inbound RTP", {
+            linkedid: session.linkedid,
+            externalChannelId: session.externalChannelId,
+            message: error.message,
+        });
+    });
+
     await ariService.ariRequest("post", `/bridges/${encodeURIComponent(session.bridgeId)}/addChannel`, {
         params: {
             channel: session.externalChannelId,
@@ -615,8 +636,55 @@ async function createExternalMediaChannel(session) {
         bridgeId: session.bridgeId,
         externalChannelId: session.externalChannelId,
         externalHost: `${session.rtpHost}:${session.rtpPort}`,
+        asteriskRtpDestination: session.remoteRtp,
         format: env.ariExternalMediaFormat,
     });
+}
+
+async function resolveAsteriskRtpDestination(session, request = ariService.ariRequest) {
+    const channelId = encodeURIComponent(session.externalChannelId);
+    let lastError = null;
+
+    for (let attempt = 1; attempt <= 5; attempt += 1) {
+        try {
+            const [addressResponse, portResponse] = await Promise.all([
+                request("get", `/channels/${channelId}/variable`, {
+                    params: { variable: "UNICASTRTP_LOCAL_ADDRESS" },
+                }),
+                request("get", `/channels/${channelId}/variable`, {
+                    params: { variable: "UNICASTRTP_LOCAL_PORT" },
+                }),
+            ]);
+            const address = String(addressResponse.data?.value || "").trim();
+            const port = Number(portResponse.data?.value || 0);
+
+            if (address && Number.isInteger(port) && port > 0 && port <= 65535) {
+                session.remoteRtp = { address, port };
+                session.remoteRtpSource = "channel_variables";
+                session.lastError = null;
+                session.updatedAt = new Date().toISOString();
+
+                console.log("[ari:media] Asterisk RTP destination resolved", {
+                    linkedid: session.linkedid,
+                    address,
+                    port,
+                    attempt,
+                });
+
+                return session.remoteRtp;
+            }
+
+            lastError = new Error("Asterisk returned an invalid UnicastRTP address or port");
+        } catch (error) {
+            lastError = error;
+        }
+
+        if (attempt < 5) {
+            await delay(50 * attempt);
+        }
+    }
+
+    throw new Error(`Unable to resolve Asterisk RTP destination: ${lastError?.message || "unknown error"}`);
 }
 
 function handleRtpPacket(session, packet) {
@@ -666,7 +734,19 @@ function handleRtpPacket(session, packet) {
 }
 
 function sendAgentAudioToAsterisk(session, pcm48Buffer) {
+    session.agentFramesReceived += 1;
+    session.updatedAt = new Date().toISOString();
+
+    if (session.agentFramesReceived === 1) {
+        console.log("[ari:media] first browser audio frame received", {
+            linkedid: session.linkedid,
+            bytes: pcm48Buffer.length,
+            hasRtpDestination: Boolean(session.remoteRtp),
+        });
+    }
+
     if (!session.rtpSocket || !session.remoteRtp) {
+        session.agentFramesDroppedNoRtp += 1;
         return;
     }
 
@@ -682,8 +762,6 @@ function sendAgentAudioToAsterisk(session, pcm48Buffer) {
 
     if (payloads.length > 0) {
         session.rtpSendQueue.push(...payloads);
-        session.agentFramesReceived += 1;
-        session.updatedAt = new Date().toISOString();
         startRtpSendTimer(session);
     }
 }
@@ -717,6 +795,15 @@ function startRtpSendTimer(session) {
         session.rtpSocket.send(packet, session.remoteRtp.port, session.remoteRtp.address);
         session.rtpPacketsSent += 1;
         session.updatedAt = new Date().toISOString();
+
+        if (session.rtpPacketsSent === 1) {
+            console.log("[ari:media] first RTP packet sent to Asterisk", {
+                linkedid: session.linkedid,
+                address: session.remoteRtp.address,
+                port: session.remoteRtp.port,
+                source: session.remoteRtpSource,
+            });
+        }
     }, intervalMs);
 
     if (typeof session.rtpSendTimer.unref === "function") {
@@ -741,10 +828,12 @@ function snapshotMediaSession(session) {
         rtpBindHost: session.rtpBindHost,
         rtpPort: session.rtpPort,
         remoteRtp: session.remoteRtp ? { ...session.remoteRtp } : null,
+        remoteRtpSource: session.remoteRtpSource || null,
         rtpPacketsReceived: session.rtpPacketsReceived,
         rtpPacketsSent: session.rtpPacketsSent,
         rtpSendQueueLength: session.rtpSendQueue ? session.rtpSendQueue.length : 0,
         agentFramesReceived: session.agentFramesReceived,
+        agentFramesDroppedNoRtp: session.agentFramesDroppedNoRtp || 0,
         browserFramesSent: session.browserFramesSent,
         activeAgentId: session.activeAgentId,
         aiAgentId: session.aiAgentId || null,
@@ -873,5 +962,6 @@ module.exports = {
             mediaSessionsById.clear();
             mediaSessionsByLinkedId.clear();
         },
+        resolveAsteriskRtpDestination,
     },
 };
