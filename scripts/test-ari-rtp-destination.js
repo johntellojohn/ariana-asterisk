@@ -1,5 +1,6 @@
 const assert = require("assert");
 
+const env = require("../src/config/env");
 const ariMediaService = require("../src/modules/ari/ari-media.service");
 
 async function resolvesChannelVariables() {
@@ -72,10 +73,38 @@ async function reportsUnavailableVariablesForFallback() {
     assert.strictEqual(session.remoteRtp, null);
 }
 
+function boundsRtpQueueForRealtime() {
+    const previousFrameMs = env.ariExternalMediaFrameMs;
+    const previousMaxQueueMs = env.ariExternalMediaMaxQueueMs;
+    const session = {
+        linkedid: "linked-rtp-latency",
+        rtpSendQueue: [],
+        rtpPacketsDroppedLatency: 0,
+    };
+
+    env.ariExternalMediaFrameMs = 20;
+    env.ariExternalMediaMaxQueueMs = 200;
+
+    try {
+        const payloads = Array.from({ length: 15 }, (_, index) => Buffer.from([index]));
+        const dropped = ariMediaService.__test.enqueueRtpPayloads(session, payloads);
+
+        assert.strictEqual(dropped, 5);
+        assert.strictEqual(session.rtpSendQueue.length, 10);
+        assert.strictEqual(session.rtpPacketsDroppedLatency, 5);
+        assert.strictEqual(session.rtpSendQueue[0][0], 5, "oldest audio must be discarded first");
+        assert.strictEqual(session.rtpSendQueue[9][0], 14);
+    } finally {
+        env.ariExternalMediaFrameMs = previousFrameMs;
+        env.ariExternalMediaMaxQueueMs = previousMaxQueueMs;
+    }
+}
+
 async function main() {
     await resolvesChannelVariables();
     await retriesWhileVariablesInitialize();
     await reportsUnavailableVariablesForFallback();
+    boundsRtpQueueForRealtime();
     console.log("ARI RTP destination tests passed");
 }
 

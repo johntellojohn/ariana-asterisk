@@ -185,10 +185,11 @@ async function closeMediaSession(idOrLinkedid, reason = "closed") {
     }
 
     if (session.rtpSendTimer) {
-        clearInterval(session.rtpSendTimer);
+        clearTimeout(session.rtpSendTimer);
         session.rtpSendTimer = null;
     }
 
+    session.rtpNextSendAt = 0;
     session.rtpSendQueue = [];
 
     if (session.externalChannelId) {
@@ -470,6 +471,7 @@ function createMediaSession(linkedid, ariSession, options = {}) {
         remoteRtpSource: null,
         rtpPacketsReceived: 0,
         rtpPacketsSent: 0,
+        rtpPacketsDroppedLatency: 0,
         agentFramesReceived: 0,
         agentFramesDroppedNoRtp: 0,
         browserFramesSent: 0,
@@ -498,6 +500,7 @@ function createMediaSession(linkedid, ariSession, options = {}) {
         },
         rtpSendQueue: [],
         rtpSendTimer: null,
+        rtpNextSendAt: 0,
         recording: new CallRecording({
             sessionId: id,
             callId: linkedid,
@@ -761,9 +764,36 @@ function sendAgentAudioToAsterisk(session, pcm48Buffer) {
     const payloads = pcm48BufferToUlawPayloads(pcm48Buffer, session.codecState, frameSamples);
 
     if (payloads.length > 0) {
-        session.rtpSendQueue.push(...payloads);
+        enqueueRtpPayloads(session, payloads);
         startRtpSendTimer(session);
     }
+}
+
+function enqueueRtpPayloads(session, payloads) {
+    session.rtpSendQueue.push(...payloads);
+
+    const frameMs = Math.max(1, env.ariExternalMediaFrameMs);
+    const maxQueueFrames = Math.max(1, Math.ceil(env.ariExternalMediaMaxQueueMs / frameMs));
+    const excess = Math.max(0, session.rtpSendQueue.length - maxQueueFrames);
+
+    if (excess === 0) {
+        return 0;
+    }
+
+    session.rtpSendQueue.splice(0, excess);
+    session.rtpPacketsDroppedLatency = (session.rtpPacketsDroppedLatency || 0) + excess;
+
+    if (session.rtpPacketsDroppedLatency === excess || session.rtpPacketsDroppedLatency % 50 < excess) {
+        console.warn("[ari:media] stale RTP audio dropped to preserve realtime", {
+            linkedid: session.linkedid,
+            dropped: excess,
+            droppedTotal: session.rtpPacketsDroppedLatency,
+            queueLength: session.rtpSendQueue.length,
+            maxQueueMs: env.ariExternalMediaMaxQueueMs,
+        });
+    }
+
+    return excess;
 }
 
 function startRtpSendTimer(session) {
@@ -772,19 +802,20 @@ function startRtpSendTimer(session) {
     }
 
     const intervalMs = Math.max(1, env.ariExternalMediaFrameMs);
+    session.rtpNextSendAt = Date.now();
 
-    session.rtpSendTimer = setInterval(() => {
+    const sendNext = () => {
+        session.rtpSendTimer = null;
+
         if (session.status === "closed" || !session.rtpSocket || !session.remoteRtp) {
-            clearInterval(session.rtpSendTimer);
-            session.rtpSendTimer = null;
+            session.rtpNextSendAt = 0;
             return;
         }
 
         const payload = session.rtpSendQueue.shift();
 
         if (!payload) {
-            clearInterval(session.rtpSendTimer);
-            session.rtpSendTimer = null;
+            session.rtpNextSendAt = 0;
             return;
         }
 
@@ -804,11 +835,23 @@ function startRtpSendTimer(session) {
                 source: session.remoteRtpSource,
             });
         }
-    }, intervalMs);
 
-    if (typeof session.rtpSendTimer.unref === "function") {
-        session.rtpSendTimer.unref();
-    }
+        const now = Date.now();
+        session.rtpNextSendAt += intervalMs;
+
+        if (session.rtpNextSendAt < now - intervalMs) {
+            session.rtpNextSendAt = now;
+        }
+
+        const delayMs = Math.max(0, session.rtpNextSendAt - now);
+        session.rtpSendTimer = setTimeout(sendNext, delayMs);
+
+        if (typeof session.rtpSendTimer.unref === "function") {
+            session.rtpSendTimer.unref();
+        }
+    };
+
+    sendNext();
 }
 
 function snapshotMediaSession(session) {
@@ -831,7 +874,10 @@ function snapshotMediaSession(session) {
         remoteRtpSource: session.remoteRtpSource || null,
         rtpPacketsReceived: session.rtpPacketsReceived,
         rtpPacketsSent: session.rtpPacketsSent,
+        rtpPacketsDroppedLatency: session.rtpPacketsDroppedLatency || 0,
         rtpSendQueueLength: session.rtpSendQueue ? session.rtpSendQueue.length : 0,
+        rtpSendQueueMs: (session.rtpSendQueue ? session.rtpSendQueue.length : 0)
+            * Math.max(1, env.ariExternalMediaFrameMs),
         agentFramesReceived: session.agentFramesReceived,
         agentFramesDroppedNoRtp: session.agentFramesDroppedNoRtp || 0,
         browserFramesSent: session.browserFramesSent,
@@ -870,10 +916,11 @@ function clearAsteriskAudioQueue(idOrLinkedid, reason = "cleared") {
     const cleared = session.rtpSendQueue ? session.rtpSendQueue.length : 0;
 
     if (session.rtpSendTimer) {
-        clearInterval(session.rtpSendTimer);
+        clearTimeout(session.rtpSendTimer);
         session.rtpSendTimer = null;
     }
 
+    session.rtpNextSendAt = 0;
     session.rtpSendQueue = [];
     session.codecState = {
         downsampleRemainder: new Int16Array(0),
@@ -963,5 +1010,6 @@ module.exports = {
             mediaSessionsByLinkedId.clear();
         },
         resolveAsteriskRtpDestination,
+        enqueueRtpPayloads,
     },
 };
