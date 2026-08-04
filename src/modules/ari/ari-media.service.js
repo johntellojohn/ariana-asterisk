@@ -20,9 +20,10 @@ ariService.onSessionEvent((session, event) => {
         return;
     }
 
-    const mediaSession = mediaSessionsByLinkedId.get(session.linkedid);
+    const mediaSession = (session.linkedid && mediaSessionsByLinkedId.get(session.linkedid)) ||
+        (session.channelId && mediaSessionsById.get(session.channelId));
 
-    if (!mediaSession || mediaSession.channelId !== session.channelId) {
+    if (!mediaSession || mediaSession.status === "closed") {
         return;
     }
 
@@ -35,6 +36,26 @@ ariService.onSessionEvent((session, event) => {
         });
     });
 });
+
+if (typeof pbxService.onRedirectStasisEarlyEnd === "function") {
+    pbxService.onRedirectStasisEarlyEnd((event) => {
+        if (!event || !event.linkedid) {
+            return;
+        }
+
+        const mediaSession = mediaSessionsByLinkedId.get(event.linkedid);
+        if (mediaSession && mediaSession.status !== "closed") {
+            setImmediate(() => {
+                closeMediaSession(mediaSession.id, "redirect_stasis_early_end").catch((error) => {
+                    console.warn("[ari:media] early end auto close failed", {
+                        linkedid: mediaSession.linkedid,
+                        message: error.message,
+                    });
+                });
+            });
+        }
+    });
+}
 
 async function startMediaSessionByLinkedId(linkedid, options = {}) {
     ensureMediaFormatSupported();
@@ -748,16 +769,16 @@ function sendAgentAudioToAsterisk(session, pcm48Buffer) {
         });
     }
 
-    if (!session.rtpSocket || !session.remoteRtp) {
-        session.agentFramesDroppedNoRtp += 1;
-        return;
-    }
-
     if (session.recording) {
         session.recording.recordAgentPcm(pcm48Buffer, {
             sampleRate: 48000,
             channelCount: 1,
         });
+    }
+
+    if (!session.rtpSocket || !session.remoteRtp) {
+        session.agentFramesDroppedNoRtp += 1;
+        return;
     }
 
     const frameSamples = Math.max(1, Math.round(8000 * env.ariExternalMediaFrameMs / 1000));
