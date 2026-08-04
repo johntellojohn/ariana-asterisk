@@ -96,6 +96,8 @@ const env = {
     callRecordingEnabled: toBoolean(process.env.CALL_RECORDING_ENABLED, true),
     callRecordingTranscribe: toBoolean(process.env.CALL_RECORDING_TRANSCRIBE, true),
     callRecordingAnalyze: toBoolean(process.env.CALL_RECORDING_ANALYZE, true),
+    callRecordingSampleRate: toNumber(process.env.CALL_RECORDING_SAMPLE_RATE, 16000),
+    callRecordingEncodeMp3: toBoolean(process.env.CALL_RECORDING_ENCODE_MP3, true),
     callCallbackTimeoutMs: toNumber(process.env.CALL_CALLBACK_TIMEOUT_MS, 30000),
     maxAudioUploadMb: toNumber(process.env.MAX_AUDIO_UPLOAD_MB, 25),
     tmpDir: process.env.TMP_DIR || path.join(process.cwd(), "tmp"),
