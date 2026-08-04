@@ -57,6 +57,31 @@ if (typeof pbxService.onRedirectStasisEarlyEnd === "function") {
     });
 }
 
+if (typeof pbxService.onManagerEvent === "function") {
+    pbxService.onManagerEvent((event) => {
+        if (!event || !event.linkedid) {
+            return;
+        }
+
+        const eventName = String(event.event || "").toLowerCase();
+
+        if (["hangup", "bridgeleave"].includes(eventName)) {
+            const mediaSession = mediaSessionsByLinkedId.get(event.linkedid);
+
+            if (mediaSession && mediaSession.status !== "closed") {
+                setImmediate(() => {
+                    closeMediaSession(mediaSession.id, `pbx_${eventName}`).catch((error) => {
+                        console.warn("[ari:media] pbx event auto close failed", {
+                            linkedid: mediaSession.linkedid,
+                            message: error.message,
+                        });
+                    });
+                });
+            }
+        }
+    });
+}
+
 async function startMediaSessionByLinkedId(linkedid, options = {}) {
     ensureMediaFormatSupported();
 

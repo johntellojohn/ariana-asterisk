@@ -157,6 +157,7 @@ function handleManagerEvent(event) {
     logCallSummary(normalized.linkedid);
     notifyRedirectStasisEarlyEnd(normalized);
     notifyLaravel(normalized);
+    lifecycleEvents.emit("manager-event", normalized);
 }
 
 function normalizeEventName(event) {
@@ -466,6 +467,13 @@ async function hangupCall(linkedid, reason = "laravel_hangup") {
     rememberAction(linkedid, "hangup_requested", { reason });
 
     const call = callsByLinkedId.get(linkedid);
+
+    try {
+        const ariMediaService = require("../ari/ari-media.service");
+        if (ariMediaService && typeof ariMediaService.closeMediaSession === "function") {
+            ariMediaService.closeMediaSession(linkedid, reason).catch(() => {});
+        }
+    } catch (_) {}
 
     if (!call) {
         const error = new Error("PBX call not found");
