@@ -1,5 +1,9 @@
 require("dotenv").config();
 
+const { normalizePublicBaseUrl } = require("../utils/public-url");
+
+const nodeEnv = process.env.NODE_ENV || "development";
+
 function toNumber(value, fallback) {
     const parsed = Number(value);
 
@@ -33,11 +37,11 @@ const laravelTrunkEventsPath =
 const path = require("path");
 
 const env = {
-    nodeEnv: process.env.NODE_ENV || "development",
+    nodeEnv,
     port: toNumber(process.env.PORT, 3002),
     appName: process.env.APP_NAME || "Ariana Asterisk Gateway",
     buildVersion: process.env.APP_BUILD_VERSION || "ari-ai-trunk-v1",
-    publicBaseUrl: process.env.PUBLIC_BASE_URL || "",
+    publicBaseUrl: normalizePublicBaseUrl(process.env.PUBLIC_BASE_URL, nodeEnv),
     corsOrigins: toList(process.env.CORS_ORIGINS, ["*"]),
     logLevel: process.env.LOG_LEVEL || "info",
 
