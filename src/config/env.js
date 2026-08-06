@@ -92,6 +92,7 @@ const env = {
     trunkAiInterruptionMinSpeechMs: toNumber(process.env.TRUNK_AI_INTERRUPTION_MIN_SPEECH_MS, 250),
     trunkAiInterruptionWindowMs: toNumber(process.env.TRUNK_AI_INTERRUPTION_WINDOW_MS, 700),
     trunkAiDisconnectToneEnabled: toBoolean(process.env.TRUNK_AI_DISCONNECT_TONE_ENABLED, true),
+    trunkHumanDisconnectToneEnabled: toBoolean(process.env.TRUNK_HUMAN_DISCONNECT_TONE_ENABLED, true),
     trunkAiDisconnectToneMinMs: toNumber(process.env.TRUNK_AI_DISCONNECT_TONE_MIN_MS, 1800),
     trunkAiDisconnectToneSuppressMs: toNumber(process.env.TRUNK_AI_DISCONNECT_TONE_SUPPRESS_MS, 700),
     trunkAiDisconnectToneRmsThreshold: toNumber(process.env.TRUNK_AI_DISCONNECT_TONE_RMS_THRESHOLD, 0.012),

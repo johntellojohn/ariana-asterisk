@@ -3,6 +3,7 @@ const dgram = require("dgram");
 
 const env = require("../../config/env");
 const ariService = require("./ari.service");
+const disconnectToneDetector = require("./disconnect-tone-detector");
 const pbxService = require("../pbx/pbx.service");
 const { CallRecording } = require("../calls/call-recording");
 const {
@@ -305,6 +306,9 @@ function attachAgentWebSocket(linkedid, ws, options = {}) {
     session.activeAgentId = options.agentId || null;
     session.status = "agent_connected";
     session.updatedAt = new Date().toISOString();
+    session.disconnectToneArmed = false;
+    session.disconnectToneClosed = false;
+    disconnectToneDetector.reset(session);
 
     if (session.recording) {
         session.recording.agentId = session.activeAgentId;
@@ -390,6 +394,9 @@ function activateAgentOwner(idOrLinkedid, options = {}) {
     session.onClose = null;
     session.status = "agent_waiting";
     session.updatedAt = new Date().toISOString();
+    session.disconnectToneArmed = false;
+    session.disconnectToneClosed = false;
+    disconnectToneDetector.reset(session);
     refreshAgentWebSocketAccess(session, humanAgentId);
 
     if (session.recording) {
@@ -460,6 +467,9 @@ function activateAiOwner(idOrLinkedid, options = {}) {
     session.onClose = typeof options.onClose === "function"
         ? options.onClose
         : null;
+    session.disconnectToneArmed = false;
+    session.disconnectToneClosed = false;
+    disconnectToneDetector.reset(session);
     session.agentWs = null;
     session.activeAgentId = null;
     session.status = "ai_connected";
@@ -521,6 +531,18 @@ function createMediaSession(linkedid, ariSession, options = {}) {
         agentFramesReceived: 0,
         agentFramesDroppedNoRtp: 0,
         browserFramesSent: 0,
+        disconnectToneArmed: false,
+        disconnectToneClosed: false,
+        disconnectToneMs: 0,
+        disconnectToneLastAt: 0,
+        disconnectToneBurstMs: 0,
+        disconnectToneGapMs: 0,
+        disconnectToneLastGapMs: 0,
+        disconnectToneBursts: 0,
+        disconnectToneCadenceStartedAt: 0,
+        disconnectToneBurstFrequency: null,
+        disconnectToneReferenceFrequency: null,
+        disconnectToneBurstQualified: false,
         wsKey: agentAccess.key,
         agentWebSocketPath: agentAccess.path,
         agentWebSocketUrl: agentAccess.url,
@@ -748,6 +770,10 @@ function handleRtpPacket(session, packet) {
 
     const pcm48 = decodeUlawPayloadToPcm48(rtp.payload);
 
+    if (trackHumanDisconnectTone(session, pcm48)) {
+        return;
+    }
+
     if (session.recording) {
         session.recording.recordCustomerPcm(pcm48, {
             sampleRate: 48000,
@@ -782,9 +808,72 @@ function handleRtpPacket(session, packet) {
     }
 }
 
+function trackHumanDisconnectTone(session, pcm48) {
+    if (!env.trunkHumanDisconnectToneEnabled
+        || session.owner !== "agent"
+        || session.status === "closed"
+        || !session.disconnectToneArmed
+        || !session.agentWs
+        || session.agentWs.readyState !== 1) {
+        return false;
+    }
+
+    const previousBursts = session.disconnectToneBursts || 0;
+    const frame = disconnectToneDetector.createFrame(pcm48);
+    const result = disconnectToneDetector.track(session, pcm48, frame, {
+        enabled: true,
+        hasOutput: true,
+    });
+
+    if (!result.shouldClose && (session.disconnectToneBursts || 0) > previousBursts) {
+        console.log("[ari:media] disconnect tone cadence candidate", {
+            linkedid: session.linkedid,
+            bursts: session.disconnectToneBursts,
+            burstMs: Math.round(session.disconnectToneBurstMs || 0),
+            frequency: session.disconnectToneReferenceFrequency,
+        });
+    }
+
+    if (!result.shouldClose) {
+        return false;
+    }
+
+    closeAfterHumanDisconnectTone(session, result.reason);
+
+    return true;
+}
+
+function closeAfterHumanDisconnectTone(session, detail = {}) {
+    if (session.disconnectToneClosed || session.status === "closed") {
+        return;
+    }
+
+    session.disconnectToneClosed = true;
+
+    console.log("[ari:media] disconnect tone detected, closing human trunk session", {
+        linkedid: session.linkedid,
+        sessionId: session.id,
+        ...detail,
+    });
+
+    pbxService.hangupCall(session.linkedid, "disconnect_tone_detected").catch((error) => {
+        session.lastError = error.message;
+        console.warn("[ari:media] failed hanging up PBX call after disconnect tone", {
+            linkedid: session.linkedid,
+            sessionId: session.id,
+            message: error.message,
+            status: error.status || error.response?.status || null,
+        });
+    });
+}
+
 function sendAgentAudioToAsterisk(session, pcm48Buffer) {
     session.agentFramesReceived += 1;
     session.updatedAt = new Date().toISOString();
+
+    if (session.owner === "agent") {
+        session.disconnectToneArmed = true;
+    }
 
     if (session.agentFramesReceived === 1) {
         console.log("[ari:media] first browser audio frame received", {
@@ -927,6 +1016,9 @@ function snapshotMediaSession(session) {
         agentFramesReceived: session.agentFramesReceived,
         agentFramesDroppedNoRtp: session.agentFramesDroppedNoRtp || 0,
         browserFramesSent: session.browserFramesSent,
+        disconnectToneArmed: Boolean(session.disconnectToneArmed),
+        disconnectToneBursts: session.disconnectToneBursts || 0,
+        disconnectToneMs: Math.round(session.disconnectToneMs || 0),
         activeAgentId: session.activeAgentId,
         aiAgentId: session.aiAgentId || null,
         lastTransferId: session.lastTransferId || null,
@@ -1057,5 +1149,7 @@ module.exports = {
         },
         resolveAsteriskRtpDestination,
         enqueueRtpPayloads,
+        trackHumanDisconnectTone,
+        closeAfterHumanDisconnectTone,
     },
 };

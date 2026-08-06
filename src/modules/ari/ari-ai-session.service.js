@@ -3,6 +3,7 @@ const WebSocket = require("ws");
 
 const env = require("../../config/env");
 const ariMediaService = require("./ari-media.service");
+const disconnectToneDetector = require("./disconnect-tone-detector");
 const pbxService = require("../pbx/pbx.service");
 const laravelService = require("../laravel/laravel.service");
 const { resamplePcm16 } = require("./pcm-utils");
@@ -10,7 +11,6 @@ const { SpeechInterruptionGate } = require("./speech-interruption-gate");
 const { callTool } = require("../laravel/voice-agent-tools.service");
 
 const ASTERISK_PCM_RATE = 48000;
-const DISCONNECT_TONE_FREQUENCIES = [350, 400, 425, 440, 450, 480, 620];
 
 const aiSessionsById = new Map();
 const aiSessionsByLinkedId = new Map();
@@ -393,6 +393,7 @@ function createAiSession(linkedid, payload = {}) {
         disconnectToneClosed: false,
         disconnectToneBurstMs: 0,
         disconnectToneGapMs: 0,
+        disconnectToneLastGapMs: 0,
         disconnectToneBursts: 0,
         disconnectToneCadenceStartedAt: 0,
         disconnectToneBurstFrequency: null,
@@ -1139,235 +1140,10 @@ function trackInputSpeech(session, pcm48) {
 }
 
 function trackDisconnectTone(session, pcm48, speechFrame) {
-    if (!env.trunkAiDisconnectToneEnabled || session.disconnectToneClosed) {
-        return { shouldClose: false, suppressRealtime: false };
-    }
-
-    if (session.outputFramesSent <= 0) {
-        return { shouldClose: false, suppressRealtime: false };
-    }
-
-    const durationMs = Math.max(1, speechFrame.durationMs || 0);
-    const tone = detectDisconnectTone(pcm48, speechFrame);
-    const cadence = trackDisconnectToneCadence(session, tone, durationMs, speechFrame.at);
-
-    if (tone.detected) {
-        session.disconnectToneMs += durationMs;
-        session.disconnectToneLastAt = speechFrame.at;
-    } else {
-        session.disconnectToneMs = Math.max(0, session.disconnectToneMs - (durationMs * 0.65));
-    }
-
-    const suppressRealtime = session.disconnectToneMs >= env.trunkAiDisconnectToneSuppressMs;
-
-    if (cadence.shouldClose) {
-        return {
-            shouldClose: true,
-            suppressRealtime: true,
-            reason: {
-                detection: "cadence",
-                bursts: cadence.bursts,
-                burstMs: cadence.burstMs,
-                gapMs: cadence.gapMs,
-                confidence: Number(tone.confidence.toFixed(4)),
-                level: Number(speechFrame.level.toFixed(5)),
-                frequency: tone.frequency,
-            },
-        };
-    }
-
-    if (session.disconnectToneMs < env.trunkAiDisconnectToneMinMs) {
-        return { shouldClose: false, suppressRealtime };
-    }
-
-    return {
-        shouldClose: true,
-        suppressRealtime: true,
-        reason: {
-            detection: "sustained",
-            toneMs: Math.round(session.disconnectToneMs),
-            confidence: Number(tone.confidence.toFixed(4)),
-            level: Number(speechFrame.level.toFixed(5)),
-            frequency: tone.frequency,
-        },
-    };
-}
-
-function trackDisconnectToneCadence(session, tone, durationMs, at = Date.now()) {
-    if (!env.trunkAiDisconnectToneCadenceEnabled) {
-        return { shouldClose: false };
-    }
-
-    const now = Number(at) || Date.now();
-    const windowMs = Math.max(1, env.trunkAiDisconnectToneWindowMs);
-
-    if (session.disconnectToneCadenceStartedAt
-        && now - session.disconnectToneCadenceStartedAt > windowMs) {
-        resetDisconnectToneCadence(session);
-    }
-
-    if (!tone.detected) {
-        if (session.disconnectToneCadenceStartedAt) {
-            session.disconnectToneGapMs = (session.disconnectToneGapMs || 0) + durationMs;
-
-            if (session.disconnectToneGapMs > env.trunkAiDisconnectToneGapMaxMs) {
-                resetDisconnectToneCadence(session);
-            }
-        }
-
-        return { shouldClose: false };
-    }
-
-    if (!session.disconnectToneCadenceStartedAt) {
-        session.disconnectToneCadenceStartedAt = now;
-    }
-
-    const previousGapMs = session.disconnectToneGapMs || 0;
-
-    if (previousGapMs >= env.trunkAiDisconnectToneGapMinMs) {
-        const validGap = previousGapMs <= env.trunkAiDisconnectToneGapMaxMs;
-        const validBurst = session.disconnectToneBurstQualified;
-        const matchingFrequency = frequenciesMatch(
-            session.disconnectToneReferenceFrequency,
-            tone.frequency
-        );
-
-        if (!validGap || !validBurst || !matchingFrequency) {
-            resetDisconnectToneCadence(session);
-            session.disconnectToneCadenceStartedAt = now;
-        } else {
-            session.disconnectToneBurstMs = 0;
-            session.disconnectToneBurstFrequency = tone.frequency;
-            session.disconnectToneBurstQualified = false;
-        }
-    }
-
-    session.disconnectToneGapMs = 0;
-    session.disconnectToneBurstMs = (session.disconnectToneBurstMs || 0) + durationMs;
-    session.disconnectToneBurstFrequency ??= tone.frequency;
-
-    if (!session.disconnectToneBurstQualified
-        && session.disconnectToneBurstMs >= env.trunkAiDisconnectToneBurstMinMs) {
-        if (!frequenciesMatch(session.disconnectToneReferenceFrequency, tone.frequency)) {
-            resetDisconnectToneCadence(session);
-            session.disconnectToneCadenceStartedAt = now;
-            session.disconnectToneBurstMs = durationMs;
-            session.disconnectToneBurstFrequency = tone.frequency;
-            return { shouldClose: false };
-        }
-
-        session.disconnectToneBurstQualified = true;
-        session.disconnectToneBursts = (session.disconnectToneBursts || 0) + 1;
-        session.disconnectToneReferenceFrequency ??= session.disconnectToneBurstFrequency;
-    }
-
-    const shouldClose = session.disconnectToneBursts >= Math.max(2, env.trunkAiDisconnectToneBurstsRequired);
-
-    return {
-        shouldClose,
-        bursts: session.disconnectToneBursts,
-        burstMs: Math.round(session.disconnectToneBurstMs),
-        gapMs: Math.round(previousGapMs),
-    };
-}
-
-function resetDisconnectToneCadence(session) {
-    session.disconnectToneBurstMs = 0;
-    session.disconnectToneGapMs = 0;
-    session.disconnectToneBursts = 0;
-    session.disconnectToneCadenceStartedAt = 0;
-    session.disconnectToneBurstFrequency = null;
-    session.disconnectToneReferenceFrequency = null;
-    session.disconnectToneBurstQualified = false;
-}
-
-function frequenciesMatch(reference, candidate) {
-    if (!Number.isFinite(reference) || !Number.isFinite(candidate)) {
-        return true;
-    }
-
-    return Math.abs(reference - candidate) <= env.trunkAiDisconnectToneFrequencyToleranceHz;
-}
-
-function detectDisconnectTone(pcm48, speechFrame) {
-    const level = speechFrame.level || 0;
-
-    if (level < env.trunkAiDisconnectToneRmsThreshold) {
-        return { detected: false, confidence: 0, frequency: null };
-    }
-
-    const sampleRate = 8000;
-    const samples = downsamplePcm16ToFloat(pcm48, ASTERISK_PCM_RATE / sampleRate);
-
-    if (samples.length < 80) {
-        return { detected: false, confidence: 0, frequency: null };
-    }
-
-    const spectrum = strongestToneRatio(samples, sampleRate, DISCONNECT_TONE_FREQUENCIES);
-    const detected = spectrum.ratio >= env.trunkAiDisconnectToneRatioThreshold;
-
-    return {
-        detected,
-        confidence: spectrum.ratio,
-        frequency: spectrum.frequency,
-    };
-}
-
-function downsamplePcm16ToFloat(buffer, step) {
-    const stride = Math.max(1, Math.round(step));
-    const values = [];
-    let total = 0;
-
-    for (let offset = 0; offset + 1 < buffer.length; offset += 2 * stride) {
-        const value = buffer.readInt16LE(offset) / 32768;
-        values.push(value);
-        total += value;
-    }
-
-    if (!values.length) {
-        return values;
-    }
-
-    const mean = total / values.length;
-
-    return values.map((value) => value - mean);
-}
-
-function strongestToneRatio(samples, sampleRate, frequencies) {
-    const totalEnergy = samples.reduce((total, sample) => total + (sample * sample), 0);
-
-    if (totalEnergy <= 0) {
-        return { ratio: 0, frequency: null };
-    }
-
-    let best = { ratio: 0, frequency: null };
-
-    for (const frequency of frequencies) {
-        const power = goertzelPower(samples, sampleRate, frequency);
-        const ratio = power / (totalEnergy * samples.length);
-
-        if (ratio > best.ratio) {
-            best = { ratio, frequency };
-        }
-    }
-
-    return best;
-}
-
-function goertzelPower(samples, sampleRate, frequency) {
-    const omega = (2 * Math.PI * frequency) / sampleRate;
-    const coeff = 2 * Math.cos(omega);
-    let q0 = 0;
-    let q1 = 0;
-    let q2 = 0;
-
-    for (const sample of samples) {
-        q0 = (coeff * q1) - q2 + sample;
-        q2 = q1;
-        q1 = q0;
-    }
-
-    return (q1 * q1) + (q2 * q2) - (coeff * q1 * q2);
+    return disconnectToneDetector.track(session, pcm48, speechFrame, {
+        enabled: env.trunkAiDisconnectToneEnabled,
+        hasOutput: session.outputFramesSent > 0,
+    });
 }
 
 function closeAfterDisconnectTone(session, detail = {}) {
@@ -1841,7 +1617,7 @@ module.exports = {
     __test: {
         createAiSession,
         trackDisconnectTone,
-        trackDisconnectToneCadence,
+        trackDisconnectToneCadence: disconnectToneDetector.trackCadence,
         closeAfterDisconnectTone,
         notifyDisconnectToneEnded,
         dynamicToolsInstructions,
