@@ -4,6 +4,7 @@ const WebSocket = require("ws");
 const env = require("../../config/env");
 const ariMediaService = require("./ari-media.service");
 const pbxService = require("../pbx/pbx.service");
+const laravelService = require("../laravel/laravel.service");
 const { resamplePcm16 } = require("./pcm-utils");
 const { SpeechInterruptionGate } = require("./speech-interruption-gate");
 const { callTool } = require("../laravel/voice-agent-tools.service");
@@ -390,6 +391,13 @@ function createAiSession(linkedid, payload = {}) {
         disconnectToneMs: 0,
         disconnectToneLastAt: 0,
         disconnectToneClosed: false,
+        disconnectToneBurstMs: 0,
+        disconnectToneGapMs: 0,
+        disconnectToneBursts: 0,
+        disconnectToneCadenceStartedAt: 0,
+        disconnectToneBurstFrequency: null,
+        disconnectToneReferenceFrequency: null,
+        disconnectToneBurstQualified: false,
         lastError: null,
     };
 
@@ -1141,6 +1149,7 @@ function trackDisconnectTone(session, pcm48, speechFrame) {
 
     const durationMs = Math.max(1, speechFrame.durationMs || 0);
     const tone = detectDisconnectTone(pcm48, speechFrame);
+    const cadence = trackDisconnectToneCadence(session, tone, durationMs, speechFrame.at);
 
     if (tone.detected) {
         session.disconnectToneMs += durationMs;
@@ -1151,6 +1160,22 @@ function trackDisconnectTone(session, pcm48, speechFrame) {
 
     const suppressRealtime = session.disconnectToneMs >= env.trunkAiDisconnectToneSuppressMs;
 
+    if (cadence.shouldClose) {
+        return {
+            shouldClose: true,
+            suppressRealtime: true,
+            reason: {
+                detection: "cadence",
+                bursts: cadence.bursts,
+                burstMs: cadence.burstMs,
+                gapMs: cadence.gapMs,
+                confidence: Number(tone.confidence.toFixed(4)),
+                level: Number(speechFrame.level.toFixed(5)),
+                frequency: tone.frequency,
+            },
+        };
+    }
+
     if (session.disconnectToneMs < env.trunkAiDisconnectToneMinMs) {
         return { shouldClose: false, suppressRealtime };
     }
@@ -1159,12 +1184,109 @@ function trackDisconnectTone(session, pcm48, speechFrame) {
         shouldClose: true,
         suppressRealtime: true,
         reason: {
+            detection: "sustained",
             toneMs: Math.round(session.disconnectToneMs),
             confidence: Number(tone.confidence.toFixed(4)),
             level: Number(speechFrame.level.toFixed(5)),
             frequency: tone.frequency,
         },
     };
+}
+
+function trackDisconnectToneCadence(session, tone, durationMs, at = Date.now()) {
+    if (!env.trunkAiDisconnectToneCadenceEnabled) {
+        return { shouldClose: false };
+    }
+
+    const now = Number(at) || Date.now();
+    const windowMs = Math.max(1, env.trunkAiDisconnectToneWindowMs);
+
+    if (session.disconnectToneCadenceStartedAt
+        && now - session.disconnectToneCadenceStartedAt > windowMs) {
+        resetDisconnectToneCadence(session);
+    }
+
+    if (!tone.detected) {
+        if (session.disconnectToneCadenceStartedAt) {
+            session.disconnectToneGapMs = (session.disconnectToneGapMs || 0) + durationMs;
+
+            if (session.disconnectToneGapMs > env.trunkAiDisconnectToneGapMaxMs) {
+                resetDisconnectToneCadence(session);
+            }
+        }
+
+        return { shouldClose: false };
+    }
+
+    if (!session.disconnectToneCadenceStartedAt) {
+        session.disconnectToneCadenceStartedAt = now;
+    }
+
+    const previousGapMs = session.disconnectToneGapMs || 0;
+
+    if (previousGapMs >= env.trunkAiDisconnectToneGapMinMs) {
+        const validGap = previousGapMs <= env.trunkAiDisconnectToneGapMaxMs;
+        const validBurst = session.disconnectToneBurstQualified;
+        const matchingFrequency = frequenciesMatch(
+            session.disconnectToneReferenceFrequency,
+            tone.frequency
+        );
+
+        if (!validGap || !validBurst || !matchingFrequency) {
+            resetDisconnectToneCadence(session);
+            session.disconnectToneCadenceStartedAt = now;
+        } else {
+            session.disconnectToneBurstMs = 0;
+            session.disconnectToneBurstFrequency = tone.frequency;
+            session.disconnectToneBurstQualified = false;
+        }
+    }
+
+    session.disconnectToneGapMs = 0;
+    session.disconnectToneBurstMs = (session.disconnectToneBurstMs || 0) + durationMs;
+    session.disconnectToneBurstFrequency ??= tone.frequency;
+
+    if (!session.disconnectToneBurstQualified
+        && session.disconnectToneBurstMs >= env.trunkAiDisconnectToneBurstMinMs) {
+        if (!frequenciesMatch(session.disconnectToneReferenceFrequency, tone.frequency)) {
+            resetDisconnectToneCadence(session);
+            session.disconnectToneCadenceStartedAt = now;
+            session.disconnectToneBurstMs = durationMs;
+            session.disconnectToneBurstFrequency = tone.frequency;
+            return { shouldClose: false };
+        }
+
+        session.disconnectToneBurstQualified = true;
+        session.disconnectToneBursts = (session.disconnectToneBursts || 0) + 1;
+        session.disconnectToneReferenceFrequency ??= session.disconnectToneBurstFrequency;
+    }
+
+    const shouldClose = session.disconnectToneBursts >= Math.max(2, env.trunkAiDisconnectToneBurstsRequired);
+
+    return {
+        shouldClose,
+        bursts: session.disconnectToneBursts,
+        burstMs: Math.round(session.disconnectToneBurstMs),
+        gapMs: Math.round(previousGapMs),
+    };
+}
+
+function resetDisconnectToneCadence(session) {
+    session.disconnectToneBurstMs = 0;
+    session.disconnectToneGapMs = 0;
+    session.disconnectToneBursts = 0;
+    session.disconnectToneCadenceStartedAt = 0;
+    session.disconnectToneBurstFrequency = null;
+    session.disconnectToneReferenceFrequency = null;
+    session.disconnectToneBurstQualified = false;
+}
+
+function frequenciesMatch(reference, candidate) {
+    if (!Number.isFinite(reference) || !Number.isFinite(candidate)) {
+        return true;
+    }
+
+    return Math.abs(reference - candidate) <= env.trunkAiDisconnectToneFrequencyToleranceHz;
 }
 
 function detectDisconnectTone(pcm48, speechFrame) {
@@ -1261,6 +1383,15 @@ function closeAfterDisconnectTone(session, detail = {}) {
         ...detail,
     });
 
+    notifyDisconnectToneEnded(session, detail).catch((error) => {
+        console.warn("[ari:ai] failed notifying Laravel after disconnect tone", {
+            linkedid: session.linkedid,
+            sessionId: session.id,
+            message: error.message,
+            status: error.status || error.response?.status || null,
+        });
+    });
+
     closeAiSession(session.id, "disconnect_tone_detected").catch((error) => {
         session.lastError = error.message;
         console.warn("[ari:ai] failed closing ai session after disconnect tone", {
@@ -1277,6 +1408,37 @@ function closeAfterDisconnectTone(session, detail = {}) {
             message: error.message,
             status: error.status || error.response?.status || null,
         });
+    });
+}
+
+async function notifyDisconnectToneEnded(session, detail = {}) {
+    if (!env.trunkAiDisconnectToneDirectCallbackEnabled || !session.callbackUrl) {
+        return;
+    }
+
+    const time = new Date().toISOString();
+
+    await laravelService.sendTrunkCallEvent({
+        tenant: session.tenant || undefined,
+        source: "ariana-asterisk-disconnect-tone",
+        event: {
+            time,
+            event: "ended",
+            linkedid: session.linkedid,
+            uniqueid: session.linkedid,
+            dialStatus: "HANGUP",
+            causeTxt: "disconnect_tone_detected",
+            reason: "disconnect_tone_detected",
+            disconnect_tone: detail,
+        },
+        summary: {
+            linkedid: session.linkedid,
+            lastEventTime: time,
+            status: "HANGUP",
+            answered: true,
+            bridged: true,
+            result: "hangup",
+        },
     });
 }
 
@@ -1678,6 +1840,10 @@ module.exports = {
     listAiSessions,
     __test: {
         createAiSession,
+        trackDisconnectTone,
+        trackDisconnectToneCadence,
+        closeAfterDisconnectTone,
+        notifyDisconnectToneEnded,
         dynamicToolsInstructions,
         sessionConfig,
         tools,

@@ -14,6 +14,7 @@
     "test:outbound-calls": "node scripts/test-outbound-call-service.js",
     "test:ari-rtp-destination": "node scripts/test-ari-rtp-destination.js",
     "test:human-to-ai-transfer": "node scripts/test-human-to-ai-transfer.js",
+    "test:disconnect-tone": "node scripts/test-disconnect-tone.js",
     "docker:up": "docker compose up -d --build",
     "docker:down": "docker compose down",
     "docker:logs": "docker compose logs -f api"
