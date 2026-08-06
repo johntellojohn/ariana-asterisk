@@ -303,9 +303,8 @@ function updateCallSummary(event) {
         case "hangup":
             call.hangupCause = event.cause || call.hangupCause;
             call.hangupText = event.causeTxt || call.hangupText;
-            if (!call.status || call.status === "IN_PROGRESS") {
-                call.status = "HANGUP";
-            }
+            call.status = "HANGUP";
+            call.bridged = false;
             break;
         default:
             break;
@@ -325,6 +324,10 @@ function addUnique(items, value) {
 }
 
 function buildCallResult(call) {
+    if (call.status === "HANGUP") {
+        return "hangup";
+    }
+
     if (call.answered || call.bridged || call.status === "ANSWER") {
         return "answered";
     }
@@ -343,10 +346,6 @@ function buildCallResult(call) {
 
     if (call.status === "CHANUNAVAIL") {
         return "channel_unavailable";
-    }
-
-    if (call.status === "HANGUP") {
-        return "hangup";
     }
 
     return "in_progress";
@@ -1395,4 +1394,13 @@ module.exports = {
     originateDirect,
     originateOutboundApplication,
     hangupChannelByName,
+    __test: {
+        updateCallSummary,
+        resetCallTracking() {
+            callEvents.length = 0;
+            callsByLinkedId.clear();
+            rawEventsByLinkedId.clear();
+            actionsByLinkedId.clear();
+        },
+    },
 };

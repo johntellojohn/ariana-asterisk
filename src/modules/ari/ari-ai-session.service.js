@@ -113,6 +113,7 @@ async function startAiSessionByLinkedId(linkedid, payload = {}) {
                 owner: "ai",
                 agentId: session.agentId,
                 tenant: session.tenant,
+                callbackUrl: session.callbackUrl,
                 onAsteriskPcm48: (pcm48) => handleAsteriskAudio(session, pcm48),
                 onClose: () => {
                     closeAiSession(session.id, "media_session_closed", {

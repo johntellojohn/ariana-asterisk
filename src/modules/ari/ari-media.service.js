@@ -5,6 +5,7 @@ const env = require("../../config/env");
 const ariService = require("./ari.service");
 const disconnectToneDetector = require("./disconnect-tone-detector");
 const pbxService = require("../pbx/pbx.service");
+const laravelService = require("../laravel/laravel.service");
 const { CallRecording } = require("../calls/call-recording");
 const {
     parseRtpPacket,
@@ -97,6 +98,9 @@ async function startMediaSessionByLinkedId(linkedid, options = {}) {
     const existing = mediaSessionsByLinkedId.get(targetLinkedid);
 
     if (existing && existing.status !== "closed") {
+        existing.tenant = options.tenant || existing.tenant || null;
+        existing.callbackUrl = options.callbackUrl || options.callback_url || existing.callbackUrl || null;
+
         if (
             options.owner &&
             existing.owner &&
@@ -531,6 +535,8 @@ function createMediaSession(linkedid, ariSession, options = {}) {
         agentFramesReceived: 0,
         agentFramesDroppedNoRtp: 0,
         browserFramesSent: 0,
+        tenant: options.tenant || null,
+        callbackUrl: options.callbackUrl || options.callback_url || null,
         disconnectToneArmed: false,
         disconnectToneClosed: false,
         disconnectToneMs: 0,
@@ -856,6 +862,15 @@ function closeAfterHumanDisconnectTone(session, detail = {}) {
         ...detail,
     });
 
+    notifyHumanDisconnectToneEnded(session, detail).catch((error) => {
+        console.warn("[ari:media] failed notifying Laravel after disconnect tone", {
+            linkedid: session.linkedid,
+            sessionId: session.id,
+            message: error.message,
+            status: error.status || error.response?.status || null,
+        });
+    });
+
     pbxService.hangupCall(session.linkedid, "disconnect_tone_detected").catch((error) => {
         session.lastError = error.message;
         console.warn("[ari:media] failed hanging up PBX call after disconnect tone", {
@@ -864,6 +879,36 @@ function closeAfterHumanDisconnectTone(session, detail = {}) {
             message: error.message,
             status: error.status || error.response?.status || null,
         });
+    });
+}
+
+async function notifyHumanDisconnectToneEnded(session, detail = {}) {
+    if (!session.callbackUrl) {
+        return;
+    }
+
+    const time = new Date().toISOString();
+
+    await laravelService.sendTrunkCallEvent({
+        tenant: session.tenant || undefined,
+        source: "ariana-asterisk-human-disconnect-tone",
+        event: {
+            time,
+            event: "ended",
+            linkedid: session.linkedid,
+            dialStatus: "HANGUP",
+            causeTxt: "disconnect_tone_detected",
+            reason: "disconnect_tone_detected",
+            disconnect_tone: detail,
+        },
+        summary: {
+            linkedid: session.linkedid,
+            lastEventTime: time,
+            status: "HANGUP",
+            answered: true,
+            bridged: false,
+            result: "hangup",
+        },
     });
 }
 
@@ -1151,5 +1196,6 @@ module.exports = {
         enqueueRtpPayloads,
         trackHumanDisconnectTone,
         closeAfterHumanDisconnectTone,
+        notifyHumanDisconnectToneEnded,
     },
 };

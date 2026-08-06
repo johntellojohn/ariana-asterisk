@@ -131,11 +131,16 @@ async function testCloseCallbackAndPbxHangupAreIdempotent() {
 
 async function testHumanMediaCadenceHangsUpOnce() {
     const originalHangup = pbxService.hangupCall;
+    const originalCallback = laravelService.sendTrunkCallEvent;
     const hangups = [];
+    const callbacks = [];
 
     try {
         pbxService.hangupCall = async (...args) => {
             hangups.push(args);
+        };
+        laravelService.sendTrunkCallEvent = async (payload) => {
+            callbacks.push(payload);
         };
 
         const session = {
@@ -143,6 +148,8 @@ async function testHumanMediaCadenceHangsUpOnce() {
             linkedid: "human-media-cadence",
             owner: "agent",
             status: "agent_connected",
+            tenant: "tenant_human_test",
+            callbackUrl: "https://eva.test/api/trunk-calls/events",
             disconnectToneArmed: false,
             disconnectToneClosed: false,
             agentWs: { readyState: 1 },
@@ -176,9 +183,47 @@ async function testHumanMediaCadenceHangsUpOnce() {
         assert.strictEqual(session.disconnectToneClosed, true);
         assert.strictEqual(hangups.length, 1);
         assert.deepStrictEqual(hangups[0], ["human-media-cadence", "disconnect_tone_detected"]);
+        assert.strictEqual(callbacks.length, 1);
+        assert.strictEqual(callbacks[0].tenant, "tenant_human_test");
+        assert.strictEqual(callbacks[0].event.event, "ended");
+        assert.strictEqual(callbacks[0].summary.status, "HANGUP");
     } finally {
         pbxService.hangupCall = originalHangup;
+        laravelService.sendTrunkCallEvent = originalCallback;
     }
+}
+
+function testPbxHangupMakesAnsweredSummaryTerminal() {
+    pbxService.__test.resetCallTracking();
+
+    pbxService.__test.updateCallSummary({
+        time: new Date().toISOString(),
+        event: "dialend",
+        linkedid: "pbx-summary-terminal",
+        channel: "PJSIP/fxo-test",
+        dialStatus: "ANSWER",
+    });
+    pbxService.__test.updateCallSummary({
+        time: new Date().toISOString(),
+        event: "bridgeenter",
+        linkedid: "pbx-summary-terminal",
+        channel: "PJSIP/fxo-test",
+    });
+    pbxService.__test.updateCallSummary({
+        time: new Date().toISOString(),
+        event: "hangup",
+        linkedid: "pbx-summary-terminal",
+        channel: "PJSIP/fxo-test",
+        cause: "16",
+        causeTxt: "Normal Clearing",
+    });
+
+    const summary = pbxService.getCallByLinkedId("pbx-summary-terminal");
+
+    assert.strictEqual(summary.status, "HANGUP");
+    assert.strictEqual(summary.result, "hangup");
+    assert.strictEqual(summary.bridged, false);
+    pbxService.__test.resetCallTracking();
 }
 
 async function run() {
@@ -187,6 +232,7 @@ async function run() {
     testSustainedToneFallbackStillCloses();
     await testCloseCallbackAndPbxHangupAreIdempotent();
     await testHumanMediaCadenceHangsUpOnce();
+    testPbxHangupMakesAnsweredSummaryTerminal();
     console.log("disconnect tone tests passed");
 }
 
