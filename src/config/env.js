@@ -60,7 +60,7 @@ const env = {
         process.env.LARAVEL_TENANT_DATABASE ||
         process.env.LARAVEL_DATABASE ||
         process.env.TENANT_DATABASE ||
-        "sigcrm_intelho",
+        "",
     laravelTrunkEventsEnabled: toBoolean(
         process.env.LARAVEL_TRUNK_EVENTS_ENABLED ||
             process.env.PBX_LARAVEL_EVENTS_ENABLED,
@@ -135,7 +135,7 @@ const env = {
     pbxOriginatePriority: toNumber(process.env.PBX_ORIGINATE_PRIORITY, 1),
     pbxOriginateTimeoutMs: toNumber(process.env.PBX_ORIGINATE_TIMEOUT_MS, 30000),
     pbxCallerIdPrefix: process.env.PBX_CALLER_ID_PREFIX || "Ariana",
-    pbxDirectTrunkEndpoint: process.env.PBX_DIRECT_TRUNK_ENDPOINT || "fxo",
+    pbxDirectTrunkEndpoint: process.env.PBX_DIRECT_TRUNK_ENDPOINT || "",
     pbxHangupCause: toNumber(process.env.PBX_HANGUP_CAUSE, 16),
     trunkOutboundEnabled: toBoolean(process.env.TRUNK_OUTBOUND_ENABLED, false),
     trunkOutboundRetentionMs: toNumber(
