@@ -29,6 +29,14 @@ ariService.onSessionEvent((session, event) => {
         return;
     }
 
+    const eventChannelId = String(event.channel?.id || session.channelId || "");
+    if (eventChannelId && mediaSession.externalChannelId && eventChannelId === String(mediaSession.externalChannelId)) {
+        return;
+    }
+    if (eventChannelId && mediaSession.channelId && eventChannelId !== String(mediaSession.channelId)) {
+        return;
+    }
+
     setImmediate(() => {
         closeMediaSession(mediaSession.id, "ari_channel_ended").catch((error) => {
             console.warn("[ari:media] auto close failed", {
@@ -71,6 +79,17 @@ if (typeof pbxService.onManagerEvent === "function") {
             const mediaSession = mediaSessionsByLinkedId.get(event.linkedid);
 
             if (mediaSession && mediaSession.status !== "closed") {
+                const channel = String(event.channel || "");
+                if (channel.startsWith("UnicastRTP/") || (mediaSession.externalChannelId && channel === String(mediaSession.externalChannelId))) {
+                    return;
+                }
+                if (mediaSession.channelId && channel && channel !== String(mediaSession.channelId)) {
+                    return;
+                }
+                if (eventName === "bridgeleave" && mediaSession.status === "agent_waiting") {
+                    return;
+                }
+
                 setImmediate(() => {
                     closeMediaSession(mediaSession.id, `pbx_${eventName}`).catch((error) => {
                         console.warn("[ari:media] pbx event auto close failed", {
@@ -114,9 +133,12 @@ async function startMediaSessionByLinkedId(linkedid, options = {}) {
         if (
             options.owner === "agent" &&
             options.agentId &&
-            !(existing.agentWs && existing.agentWs.readyState === 1) &&
             String(existing.activeAgentId || "") !== String(options.agentId)
         ) {
+            if (existing.agentWs && existing.agentWs.readyState === 1) {
+                existing.agentWs.close(1000, "agent_transferred");
+                existing.agentWs = null;
+            }
             refreshAgentWebSocketAccess(existing, options.agentId);
         }
 

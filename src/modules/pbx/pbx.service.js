@@ -303,6 +303,9 @@ function updateCallSummary(event) {
         case "hangup":
             call.hangupCause = event.cause || call.hangupCause;
             call.hangupText = event.causeTxt || call.hangupText;
+            if (isNonTerminalHangupEvent(event, call)) {
+                break;
+            }
             call.status = "HANGUP";
             call.bridged = false;
             break;
@@ -537,15 +540,21 @@ async function connectCallToExtension(linkedid, extension, context = env.pbxOrig
     }
 
     if (isFinalCallStatus(call.status)) {
-        const error = new Error(`La llamada PBX ya no esta activa (${call.status}). Asterisk la cancelo/colgo antes de que EVA pudiera conectarla a la extension ${extension}.`);
-        error.status = 409;
-        rememberAction(linkedid, "connect_extension_rejected_final_status", {
-            extension,
-            status: call.status,
-            result: call.result,
-            channels: call.channels,
-        });
-        throw error;
+        const primary = primaryCallChannel(call);
+        if (call.answered && primary && !isCallPrimaryChannelHungUp(call)) {
+            call.status = "ANSWER";
+            call.result = "answered";
+        } else {
+            const error = new Error(`La llamada PBX ya no esta activa (${call.status}). Asterisk la cancelo/colgo antes de que EVA pudiera conectarla a la extension ${extension}.`);
+            error.status = 409;
+            rememberAction(linkedid, "connect_extension_rejected_final_status", {
+                extension,
+                status: call.status,
+                result: call.result,
+                channels: call.channels,
+            });
+            throw error;
+        }
     }
 
     const existingExtensionChannels = channelsForExtension(call, extension);
@@ -1076,6 +1085,41 @@ function isExternalMediaLifecycleEvent(event) {
         .map((value) => String(value || ""));
 
     return channels.some((channel) => channel.startsWith("UnicastRTP/"));
+}
+
+function isCallPrimaryChannelHungUp(call) {
+    const primary = primaryCallChannel(call);
+    if (!primary) {
+        return false;
+    }
+    return (call.events || []).some((event) =>
+        event.event === "hangup" && String(event.channel || "") === primary
+    );
+}
+
+function isNonTerminalHangupEvent(event, call) {
+    if (!call || !event) {
+        return false;
+    }
+
+    if (isExternalMediaLifecycleEvent(event) || isSecondaryRedirectLifecycleEvent(event)) {
+        return true;
+    }
+
+    const actions = actionsByLinkedId.get(event.linkedid) || [];
+    const redirectSent = actions.some((item) => item.action === "connect_extension_redirect_sent");
+    const primary = primaryCallChannel(call);
+    const channel = String(event.channel || "");
+
+    if (redirectSent && primary && channel && channel !== primary) {
+        return true;
+    }
+
+    if (primary && channel && channel !== primary && (call.answered || call.bridged)) {
+        return true;
+    }
+
+    return false;
 }
 
 function isPrimaryRedirectLifecycleEnd(event, call) {
