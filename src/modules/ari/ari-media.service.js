@@ -189,7 +189,7 @@ async function waitForAriSession(linkedid, timeoutMs) {
             return session;
         }
 
-        await delay(150);
+        await delay(35);
     }
 
     return null;
@@ -757,7 +757,7 @@ async function resolveAsteriskRtpDestination(session, request = ariService.ariRe
         }
 
         if (attempt < 5) {
-            await delay(50 * attempt);
+            await delay(15 * attempt);
         }
     }
 
