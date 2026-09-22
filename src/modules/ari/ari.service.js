@@ -650,7 +650,7 @@ async function addChannelToBridgeWithRetry(bridgeId, channelId) {
                 break;
             }
 
-            await delay(250);
+            await delay(50);
         }
     }
 
