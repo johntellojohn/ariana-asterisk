@@ -306,6 +306,48 @@ async function playCallMediaByLinkedId(linkedid, media) {
     return playMedia(session.channelId, media);
 }
 
+async function startMoh(channelId, mohClass = "default") {
+    const session = requireSession(channelId);
+
+    try {
+        await ariRequest("post", `/channels/${encodeURIComponent(channelId)}/moh`, {
+            params: {
+                mohClass: mohClass || "default",
+            },
+        });
+        session.mohActive = true;
+    } catch (error) {
+        console.warn("[ari] startMoh error", {
+            channelId,
+            message: error?.response?.data?.message || error?.message,
+        });
+    }
+
+    session.updatedAt = new Date().toISOString();
+
+    return snapshotSession(session);
+}
+
+async function stopMoh(channelIdOrLinkedid) {
+    const target = String(channelIdOrLinkedid || "").trim();
+    const session = findSessionByLinkedId(target) || sessionsByChannelId.get(target);
+
+    if (!session) {
+        return null;
+    }
+
+    try {
+        await ariRequest("delete", `/channels/${encodeURIComponent(session.channelId)}/moh`);
+        session.mohActive = false;
+    } catch (_) {
+    }
+
+    session.updatedAt = new Date().toISOString();
+
+    return snapshotSession(session);
+}
+
+
 async function hangupSession(channelId, reason = "normal") {
     const session = requireSession(channelId);
 

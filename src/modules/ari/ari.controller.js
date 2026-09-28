@@ -1,6 +1,8 @@
 const ariService = require("./ari.service");
 const ariMediaService = require("./ari-media.service");
 const ariAiSessionService = require("./ari-ai-session.service");
+const env = require("../../config/env");
+const pbxService = require("../pbx/pbx.service");
 
 function health(req, res) {
     res.json({
@@ -342,6 +344,65 @@ async function closeCallAiSession(req, res, next) {
         return res.json({
             ok: true,
             data: session,
+        });
+    } catch (error) {
+        next(error);
+    }
+}
+
+async function startCallWaiting(req, res, next) {
+    try {
+        const targetLinkedid = String(req.params.linkedid || "").trim();
+        let session = ariService.getSessionByLinkedId(targetLinkedid);
+
+        if (!session && env.ariStasisRedirectEnabled && typeof pbxService.redirectCallToStasis === "function") {
+            await pbxService.redirectCallToStasis(targetLinkedid).catch(() => {});
+            for (let i = 0; i < 20; i++) {
+                session = ariService.getSessionByLinkedId(targetLinkedid);
+                if (session) break;
+                await new Promise((r) => setTimeout(r, 50));
+            }
+        }
+
+        if (!session) {
+            return res.status(404).json({
+                ok: false,
+                message: "ARI session not found for linkedid",
+            });
+        }
+
+        if (!session.answeredAt && !["answered", "bridged"].includes(session.status)) {
+            await ariService.answerCallByLinkedId(targetLinkedid);
+        }
+
+        const mohClass = req.body.moh_class || req.body.mohClass || "default";
+        await ariService.startMoh(session.channelId, mohClass);
+
+        res.json({
+            ok: true,
+            data: {
+                linkedid: targetLinkedid,
+                channelId: session.channelId,
+                status: "waiting",
+                mohClass,
+            },
+        });
+    } catch (error) {
+        next(error);
+    }
+}
+
+async function stopCallWaiting(req, res, next) {
+    try {
+        const targetLinkedid = String(req.params.linkedid || "").trim();
+        await ariService.stopMoh(targetLinkedid);
+
+        res.json({
+            ok: true,
+            data: {
+                linkedid: targetLinkedid,
+                status: "waiting_stopped",
+            },
         });
     } catch (error) {
         next(error);

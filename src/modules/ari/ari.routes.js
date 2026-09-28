@@ -18,6 +18,8 @@ router.post("/outbound-calls", outboundCallController.create);
 router.get("/outbound-calls/:outboundCallId", outboundCallController.show);
 router.post("/outbound-calls/:outboundCallId/hangup", outboundCallController.hangup);
 router.get("/calls/:linkedid", ariController.showCall);
+router.post("/calls/:linkedid/waiting", ariController.startCallWaiting);
+router.post("/calls/:linkedid/waiting/stop", ariController.stopCallWaiting);
 router.post("/calls/:linkedid/media-session", ariController.startCallMediaSession);
 router.post("/calls/:linkedid/media-session/close", ariController.closeCallMediaSession);
 router.post("/calls/:linkedid/ai-session", ariController.startCallAiSession);
