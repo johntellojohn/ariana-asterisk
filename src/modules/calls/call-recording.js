@@ -37,6 +37,7 @@ class CallRecording {
         this.tenant = options.tenant || null;
         this.agentId = options.agentId || null;
         this.mode = options.mode || "trunk";
+        this.transcriptionEnabled = options.transcriptionEnabled !== false;
         this.logger = options.logger || null;
         this.startedAt = new Date();
         this.closedAt = null;
@@ -71,6 +72,10 @@ class CallRecording {
     }
 
     addTranscriptSegment(role, text, event = {}) {
+        if (!this.transcriptionEnabled) {
+            return;
+        }
+
         text = String(text || "").trim();
 
         if (!text) {
@@ -278,12 +283,17 @@ class CallRecording {
                 customer_frames: this.sources.customer.frames,
                 agent_frames: this.sources.agent.frames,
                 participant_transitions: this.participantTransitions,
+                transcription_enabled: this.transcriptionEnabled,
                 analysis,
             },
         };
     }
 
     async resolveTranscriptSegments(customerPcm, agentPcm) {
+        if (!this.transcriptionEnabled) {
+            return [];
+        }
+
         const segments = [];
 
         if (env.callRecordingTranscribe) {

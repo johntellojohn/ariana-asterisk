@@ -208,6 +208,11 @@ async function startCallMediaSession(req, res, next) {
                 agentId: req.body.agent_id || req.body.agentId || null,
                 tenant: req.body.tenant || req.body.database || null,
                 callbackUrl: req.body.callback_url || req.body.callbackUrl || null,
+                transcribeRecording: booleanInput(
+                    req.body,
+                    ["transcribe_recording", "transcribeRecording"],
+                    true
+                ),
             }
         );
 
@@ -407,6 +412,36 @@ async function stopCallWaiting(req, res, next) {
     } catch (error) {
         next(error);
     }
+}
+
+function booleanInput(payload, keys, fallback = false) {
+    for (const key of keys) {
+        if (!Object.prototype.hasOwnProperty.call(payload || {}, key)) {
+            continue;
+        }
+
+        const value = payload[key];
+
+        if (typeof value === "boolean") {
+            return value;
+        }
+
+        if (typeof value === "number") {
+            return value !== 0;
+        }
+
+        const normalized = String(value || "").trim().toLowerCase();
+
+        if (["1", "true", "yes", "on"].includes(normalized)) {
+            return true;
+        }
+
+        if (["0", "false", "no", "off", ""].includes(normalized)) {
+            return false;
+        }
+    }
+
+    return fallback;
 }
 
 module.exports = {

@@ -114,6 +114,7 @@ async function startAiSessionByLinkedId(linkedid, payload = {}) {
                 agentId: session.agentId,
                 tenant: session.tenant,
                 callbackUrl: session.callbackUrl,
+                transcribeRecording: session.transcribeRecording,
                 onAsteriskPcm48: (pcm48) => handleAsteriskAudio(session, pcm48),
                 onClose: () => {
                     closeAiSession(session.id, "media_session_closed", {
@@ -233,6 +234,7 @@ async function activateAiSessionByLinkedId(linkedid, payload = {}) {
         const mediaSession = ariMediaService.activateAiOwner(targetLinkedid, {
             transferId,
             agentId: session.agentId,
+            transcribeRecording: session.transcribeRecording,
             onAsteriskPcm48: (pcm48) => handleAsteriskAudio(session, pcm48),
             onClose: () => {
                 closeAiSession(session.id, "media_session_closed", {
@@ -350,6 +352,7 @@ function createAiSession(linkedid, payload = {}) {
         agentId: payload.agent_id || payload.agentId || null,
         tenant: payload.tenant || null,
         callbackUrl: payload.callback_url || payload.callbackUrl || null,
+        transcribeRecording: payload.transcribe_recording !== false && payload.transcribeRecording !== false,
         toolsBaseUrl: payload.tools_base_url || payload.toolsBaseUrl || null,
         dynamicTools: normalizeDynamicTools(payload.dynamic_tools || payload.dynamicTools),
         model: realtime.model || payload.model || env.openaiRealtimeModel,

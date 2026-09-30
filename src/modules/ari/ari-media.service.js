@@ -120,6 +120,10 @@ async function startMediaSessionByLinkedId(linkedid, options = {}) {
         existing.tenant = options.tenant || existing.tenant || null;
         existing.callbackUrl = options.callbackUrl || options.callback_url || existing.callbackUrl || null;
 
+        if (existing.recording && typeof options.transcribeRecording === "boolean") {
+            existing.recording.transcriptionEnabled = options.transcribeRecording;
+        }
+
         if (
             options.owner &&
             existing.owner &&
@@ -427,6 +431,10 @@ function activateAgentOwner(idOrLinkedid, options = {}) {
     refreshAgentWebSocketAccess(session, humanAgentId);
 
     if (session.recording) {
+        if (typeof options.transcribeRecording === "boolean") {
+            session.recording.transcriptionEnabled = options.transcribeRecording;
+        }
+
         session.recording.addParticipantTransition({
             transfer_id: transferId,
             from_type: "ai",
@@ -503,6 +511,10 @@ function activateAiOwner(idOrLinkedid, options = {}) {
     session.updatedAt = new Date().toISOString();
 
     if (session.recording) {
+        if (typeof options.transcribeRecording === "boolean") {
+            session.recording.transcriptionEnabled = options.transcribeRecording;
+        }
+
         session.recording.addParticipantTransition({
             transfer_id: transferId,
             from_type: "human",
@@ -605,6 +617,7 @@ function createMediaSession(linkedid, ariSession, options = {}) {
             tenant: options.tenant || null,
             agentId: options.agentId || null,
             mode: options.owner === "ai" ? "trunk_ai" : "trunk_human",
+            transcriptionEnabled: options.transcribeRecording !== false,
             logger: (message, data) => {
                 console.warn(`[ari:media] ${message}`, {
                     linkedid,
