@@ -164,7 +164,9 @@ async function startMediaSessionByLinkedId(linkedid, options = {}) {
 
     if (!baseSession.answeredAt && !["answered", "bridged"].includes(baseSession.status)) {
         await ariService.answerCallByLinkedId(targetLinkedid);
-    await ariService.stopMoh(targetLinkedid).catch(() => {});
+        if (typeof ariService.stopMoh === "function") {
+            await ariService.stopMoh(targetLinkedid).catch(() => {});
+        }
     }
 
     const bridgedSession = await ariService.ensureCallBridgeByLinkedId(targetLinkedid);

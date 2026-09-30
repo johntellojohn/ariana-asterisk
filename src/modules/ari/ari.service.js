@@ -255,7 +255,7 @@ async function answerCallByLinkedId(linkedid) {
 async function ensureBridge(channelId) {
     const session = requireSession(channelId);
 
-    if (!session.bridgeId) {
+    if (!session.ariBridgeId) {
         const response = await ariRequest("post", "/bridges", {
             params: {
                 type: "mixing",
@@ -263,16 +263,36 @@ async function ensureBridge(channelId) {
             },
         });
 
-        session.bridgeId = response.data?.id || response.data?.bridge?.id || session.bridgeId;
+        session.ariBridgeId = response.data?.id || response.data?.bridge?.id || null;
+        session.bridgeId = session.ariBridgeId || session.bridgeId;
     }
 
-    if (!session.bridgeId) {
+    const bridgeId = session.ariBridgeId || session.bridgeId;
+
+    if (!bridgeId) {
         const error = new Error("ARI bridge was not created");
         error.status = 502;
         throw error;
     }
 
-    await addChannelToBridgeWithRetry(session.bridgeId, channelId);
+    try {
+        await addChannelToBridgeWithRetry(bridgeId, channelId);
+    } catch (error) {
+        const message = String(error?.response?.data?.message || error?.message || "").toLowerCase();
+        if (message.includes("bridge not in stasis")) {
+            const response = await ariRequest("post", "/bridges", {
+                params: {
+                    type: "mixing",
+                    name: `ariana-${channelId}-${Date.now()}`,
+                },
+            });
+            session.ariBridgeId = response.data?.id || response.data?.bridge?.id;
+            session.bridgeId = session.ariBridgeId;
+            await addChannelToBridgeWithRetry(session.ariBridgeId, channelId);
+        } else {
+            throw error;
+        }
+    }
 
     session.status = "bridged";
     session.updatedAt = new Date().toISOString();
@@ -722,7 +742,7 @@ function isRetryableBridgeAddChannelError(error) {
     const status = Number(error?.response?.status || error?.status || 0);
     const message = String(error?.response?.data?.message || error?.message || "").toLowerCase();
 
-    if (status === 409 && message.includes("not in stasis")) {
+    if (status === 409 && (message.includes("channel not in stasis") || (message.includes("not in stasis") && !message.includes("bridge not in stasis")))) {
         return true;
     }
 
@@ -838,6 +858,8 @@ module.exports = {
     onSessionEvent,
     answerSession,
     answerCallByLinkedId,
+    startMoh,
+    stopMoh,
     ensureBridge,
     ensureCallBridgeByLinkedId,
     playMedia,
