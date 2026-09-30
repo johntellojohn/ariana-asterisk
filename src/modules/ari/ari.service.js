@@ -143,6 +143,8 @@ async function handleRawEvent(message) {
         case "StasisStart": {
             const session = upsertSession(channel, {
                 status: "stasis",
+                inStasis: true,
+                wasInStasis: true,
                 startedAt: event.timestamp || new Date().toISOString(),
                 stasisArgs: Array.isArray(event.args) ? event.args : [],
             });
@@ -162,7 +164,7 @@ async function handleRawEvent(message) {
             const session = upsertSession(channel);
             session.status = channel.state === "Up" ? "answered" : session.status;
             rememberSessionEvent(session, event);
-            if (channel.state === "Up") {
+            if (session.inStasis && channel.state === "Up") {
                 notifyLaravel(session, event, "dialend", "ANSWER");
             }
             break;
@@ -174,7 +176,9 @@ async function handleRawEvent(message) {
                 bridgeId: event.bridge?.id || null,
             });
             rememberSessionEvent(session, event);
-            notifyLaravel(session, event, "bridgeenter");
+            if (session.inStasis) {
+                notifyLaravel(session, event, "bridgeenter");
+            }
             break;
         }
 
@@ -187,12 +191,17 @@ async function handleRawEvent(message) {
 
         case "StasisEnd":
         case "ChannelDestroyed": {
+            const existing = sessionsByChannelId.get(channel.id);
+            const wasStasis = Boolean(existing?.inStasis || existing?.wasInStasis);
             const session = upsertSession(channel, {
                 status: "ended",
+                inStasis: false,
                 endedAt: event.timestamp || new Date().toISOString(),
             });
             rememberSessionEvent(session, event);
-            notifyLaravel(session, event, "hangup");
+            if (wasStasis) {
+                notifyLaravel(session, event, "hangup");
+            }
             break;
         }
 
@@ -253,7 +262,20 @@ async function answerCallByLinkedId(linkedid) {
 }
 
 async function ensureBridge(channelId) {
-    const session = requireSession(channelId);
+    let session = requireSession(channelId);
+
+    if (!session.inStasis) {
+        const candidate = findSessionByLinkedId(session.linkedid || channelId);
+        if (candidate && candidate.inStasis && candidate.channelId !== channelId) {
+            console.log("[ari] ensureBridge redirected non-stasis channel to stasis channel", {
+                requestedChannelId: channelId,
+                stasisChannelId: candidate.channelId,
+                linkedid: session.linkedid,
+            });
+            session = candidate;
+            channelId = session.channelId;
+        }
+    }
 
     if (!session.ariBridgeId) {
         const response = await ariRequest("post", "/bridges", {
@@ -478,11 +500,14 @@ function upsertSession(channel, attributes = {}) {
         channelId,
         linkedid: channel.linkedid || channel.id,
         status: "created",
+        inStasis: false,
+        wasInStasis: false,
         createdAt: now,
         updatedAt: now,
         answeredAt: null,
         endedAt: null,
         bridgeId: null,
+        ariBridgeId: null,
         lastPlaybackId: null,
         lastError: null,
         stasisArgs: [],
@@ -549,11 +574,14 @@ function snapshotSession(session) {
         channelId: session.channelId,
         linkedid: session.linkedid,
         status: session.status,
+        inStasis: Boolean(session.inStasis),
+        wasInStasis: Boolean(session.wasInStasis),
         createdAt: session.createdAt,
         updatedAt: session.updatedAt,
         answeredAt: session.answeredAt,
         endedAt: session.endedAt,
         bridgeId: session.bridgeId,
+        ariBridgeId: session.ariBridgeId || null,
         lastPlaybackId: session.lastPlaybackId,
         lastError: session.lastError,
         stasisArgs: [...session.stasisArgs],
@@ -585,6 +613,10 @@ function notifyLaravel(session, event, trunkEventName, dialStatus = "") {
         return;
     }
 
+    if (!session?.inStasis && !session?.wasInStasis) {
+        return;
+    }
+
     const channelName = String(session?.channel?.name || event?.channel?.name || session?.channelId || "");
     if (channelName.startsWith("UnicastRTP/")) {
         return;
@@ -596,6 +628,11 @@ function notifyLaravel(session, event, trunkEventName, dialStatus = "") {
         summary: toTrunkSummary(session, eventPayload),
         source: "ariana-asterisk-ari",
     };
+
+    if (eventPayload.outbound_call_id) {
+        payload.outbound_call_id = eventPayload.outbound_call_id;
+        payload.direction = "OUTBOUND";
+    }
 
     laravelService
         .sendTrunkCallEvent(payload)
@@ -619,7 +656,17 @@ function notifyLaravel(session, event, trunkEventName, dialStatus = "") {
 function toTrunkEvent(session, event, trunkEventName, dialStatus = "") {
     const channel = session.channel || {};
 
-    return {
+    let outboundCallId = "";
+    if (Array.isArray(session.stasisArgs)) {
+        const found = session.stasisArgs.find((arg) =>
+            /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(String(arg))
+        );
+        if (found) {
+            outboundCallId = String(found);
+        }
+    }
+
+    const payload = {
         time: event.timestamp || new Date().toISOString(),
         event: trunkEventName,
         caller: channel.callerNumber || channel.callerName || "",
@@ -634,6 +681,13 @@ function toTrunkEvent(session, event, trunkEventName, dialStatus = "") {
         cause: event.cause || "",
         causeTxt: event.cause_txt || event.causeTxt || "",
     };
+
+    if (outboundCallId) {
+        payload.outbound_call_id = outboundCallId;
+        payload.direction = "OUTBOUND";
+    }
+
+    return payload;
 }
 
 function toTrunkSummary(session, eventPayload) {
@@ -641,7 +695,7 @@ function toTrunkSummary(session, eventPayload) {
     const bridged = Boolean(session.bridgeId) || session.status === "bridged";
     const answered = Boolean(session.answeredAt) || ["answered", "bridged"].includes(session.status);
 
-    return {
+    const summary = {
         linkedid: session.linkedid,
         firstEventTime: session.startedAt || session.createdAt,
         lastEventTime: session.updatedAt,
@@ -655,6 +709,13 @@ function toTrunkSummary(session, eventPayload) {
         channels: [eventPayload.channel].filter(Boolean),
         totalEvents: session.events.length,
     };
+
+    if (eventPayload.outbound_call_id) {
+        summary.outbound_call_id = eventPayload.outbound_call_id;
+        summary.direction = "OUTBOUND";
+    }
+
+    return summary;
 }
 
 function requireSession(channelId) {
@@ -768,21 +829,70 @@ function findSessionByLinkedId(linkedid) {
         return null;
     }
 
-    const sessions = Array.from(sessionsByChannelId.values())
-        .filter((session) => session.linkedid === target || session.channelId === target)
-        .sort((left, right) => {
-            if (left.status === "ended" && right.status !== "ended") {
-                return 1;
-            }
+    const allSessions = Array.from(sessionsByChannelId.values());
 
-            if (left.status !== "ended" && right.status === "ended") {
-                return -1;
-            }
+    const directMatches = allSessions.filter((session) => {
+        if (session.channelId === target || session.linkedid === target) {
+            return true;
+        }
+        if (session.channel?.name === target) {
+            return true;
+        }
+        if (Array.isArray(session.stasisArgs) && session.stasisArgs.some((arg) => String(arg) === target)) {
+            return true;
+        }
+        return false;
+    });
 
-            return new Date(right.updatedAt || right.createdAt) - new Date(left.updatedAt || left.createdAt);
-        });
+    const relatedLinkedIds = new Set();
+    relatedLinkedIds.add(target);
+    for (const match of directMatches) {
+        if (match.linkedid) {
+            relatedLinkedIds.add(match.linkedid);
+        }
+    }
 
-    return sessions[0] || null;
+    const candidateSet = new Set(directMatches);
+    for (const session of allSessions) {
+        if (session.linkedid && relatedLinkedIds.has(session.linkedid)) {
+            candidateSet.add(session);
+        }
+    }
+
+    const candidates = Array.from(candidateSet);
+    if (candidates.length === 0) {
+        return null;
+    }
+
+    candidates.sort((left, right) => {
+        const score = (s) => {
+            let pts = 0;
+            const isEnded = s.status === "ended";
+            const inStasis = Boolean(s.inStasis);
+            const wasStasis = Boolean(s.wasInStasis);
+            const hasStasisArgs = Array.isArray(s.stasisArgs) && s.stasisArgs.length > 0;
+
+            if (!isEnded && inStasis) pts += 10000;
+            else if (!isEnded && wasStasis) pts += 5000;
+            else if (!isEnded && hasStasisArgs) pts += 3000;
+            else if (!isEnded) pts += 1000;
+            else if (inStasis) pts += 500;
+            else if (wasStasis) pts += 200;
+
+            return pts;
+        };
+
+        const diff = score(right) - score(left);
+        if (diff !== 0) {
+            return diff;
+        }
+
+        const timeRight = new Date(right.updatedAt || right.createdAt).getTime() || 0;
+        const timeLeft = new Date(left.updatedAt || left.createdAt).getTime() || 0;
+        return timeRight - timeLeft;
+    });
+
+    return candidates[0] || null;
 }
 
 function ensureReady() {

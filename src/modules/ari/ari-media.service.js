@@ -114,7 +114,8 @@ async function startMediaSessionByLinkedId(linkedid, options = {}) {
         throw error;
     }
 
-    const existing = mediaSessionsByLinkedId.get(targetLinkedid);
+    const existing = mediaSessionsByLinkedId.get(targetLinkedid) ||
+        mediaSessionsById.get(targetLinkedid);
 
     if (existing && existing.status !== "closed") {
         existing.tenant = options.tenant || existing.tenant || null;
@@ -173,7 +174,22 @@ async function startMediaSessionByLinkedId(linkedid, options = {}) {
 
     const mediaSession = createMediaSession(targetLinkedid, bridgedSession, options);
     mediaSessionsById.set(mediaSession.id, mediaSession);
-    mediaSessionsByLinkedId.set(targetLinkedid, mediaSession);
+
+    const aliases = new Set([targetLinkedid]);
+    if (bridgedSession?.linkedid) aliases.add(String(bridgedSession.linkedid));
+    if (bridgedSession?.channelId) aliases.add(String(bridgedSession.channelId));
+    if (baseSession?.linkedid) aliases.add(String(baseSession.linkedid));
+    if (baseSession?.channelId) aliases.add(String(baseSession.channelId));
+    if (Array.isArray(baseSession?.stasisArgs)) {
+        for (const arg of baseSession.stasisArgs) {
+            if (arg && typeof arg === "string") aliases.add(arg);
+        }
+    }
+
+    mediaSession.linkedidAliases = aliases;
+    for (const alias of aliases) {
+        mediaSessionsByLinkedId.set(alias, mediaSession);
+    }
 
     try {
         await bindRtpSocket(mediaSession);
@@ -300,7 +316,13 @@ async function closeMediaSession(idOrLinkedid, reason = "closed") {
         mediaSessionsById.delete(session.id);
     }
 
-    if (mediaSessionsByLinkedId.get(session.linkedid) === session) {
+    if (session.linkedidAliases && session.linkedidAliases instanceof Set) {
+        for (const alias of session.linkedidAliases) {
+            if (mediaSessionsByLinkedId.get(alias) === session) {
+                mediaSessionsByLinkedId.delete(alias);
+            }
+        }
+    } else if (mediaSessionsByLinkedId.get(session.linkedid) === session) {
         mediaSessionsByLinkedId.delete(session.linkedid);
     }
 
@@ -319,7 +341,8 @@ async function closeMediaSession(idOrLinkedid, reason = "closed") {
 }
 
 function attachAgentWebSocket(linkedid, ws, options = {}) {
-    const session = mediaSessionsByLinkedId.get(String(linkedid || "").trim());
+    const key = String(linkedid || "").trim();
+    const session = mediaSessionsByLinkedId.get(key) || mediaSessionsById.get(key);
 
     if (!session || session.status === "closed") {
         ws.close(1008, "media_session_not_found");
