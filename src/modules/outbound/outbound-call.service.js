@@ -83,6 +83,7 @@ class OutboundCallService {
             const originate = await this.pbxService.originateOutboundApplication({
                 actionId,
                 phoneNumber: input.phoneNumber,
+                fromNumber: input.fromNumber,
                 application: "Stasis",
                 applicationData: `${this.env.ariAppName},outbound,${outboundCallId}`,
                 variables: this.channelVariables(call),

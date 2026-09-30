@@ -135,6 +135,7 @@ const env = {
     pbxOriginatePriority: toNumber(process.env.PBX_ORIGINATE_PRIORITY, 1),
     pbxOriginateTimeoutMs: toNumber(process.env.PBX_ORIGINATE_TIMEOUT_MS, 30000),
     pbxCallerIdPrefix: process.env.PBX_CALLER_ID_PREFIX || "Ariana",
+    pbxDefaultCallerIdNumber: process.env.PBX_DEFAULT_CALLER_ID_NUMBER || "",
     pbxDirectTrunkEndpoint: process.env.PBX_DIRECT_TRUNK_ENDPOINT || "",
     pbxHangupCause: toNumber(process.env.PBX_HANGUP_CAUSE, 16),
     trunkOutboundEnabled: toBoolean(process.env.TRUNK_OUTBOUND_ENABLED, false),

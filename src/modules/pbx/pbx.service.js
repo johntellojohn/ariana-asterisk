@@ -1162,6 +1162,7 @@ async function originateExtension(fromExtension, toExtension) {
 async function originateOutboundApplication({
     actionId,
     phoneNumber,
+    fromNumber,
     application = "Stasis",
     applicationData = "",
     variables = {},
@@ -1185,6 +1186,7 @@ async function originateOutboundApplication({
     console.log("[pbx:action] originate outbound application requested", {
         actionId,
         phoneNumber,
+        fromNumber,
         channel,
         application,
     });
@@ -1195,7 +1197,7 @@ async function originateOutboundApplication({
         Application: application,
         Data: applicationData,
         Variable: safeVariables,
-        CallerID: callerId(phoneNumber),
+        CallerID: callerId(phoneNumber, fromNumber),
         Timeout: env.pbxOriginateTimeoutMs,
         Async: true,
     });
@@ -1220,7 +1222,7 @@ async function originateExternal(fromExtension, phoneNumber) {
         Context: env.pbxOriginateContext,
         Exten: phoneNumber,
         Priority: env.pbxOriginatePriority,
-        CallerID: callerId(phoneNumber),
+        CallerID: callerId(phoneNumber, fromExtension),
         Timeout: env.pbxOriginateTimeoutMs,
         Async: true,
     });
@@ -1243,8 +1245,13 @@ async function originateDirect(phoneNumber, trunkEndpoint = env.pbxDirectTrunkEn
     });
 }
 
-function callerId(target) {
-    return `${env.pbxCallerIdPrefix} -> ${target}`;
+function callerId(target, fromNumber = "") {
+    const prefix = env.pbxCallerIdPrefix || "Ariana";
+    const name = `${prefix} -> ${target}`;
+    const rawNumber = String(fromNumber || env.pbxDefaultCallerIdNumber || "").trim();
+    const cleanNumber = rawNumber.replace(/[^0-9+*#]/g, "");
+
+    return cleanNumber ? `"${name}" <${cleanNumber}>` : name;
 }
 
 function validateRequired(fields) {
