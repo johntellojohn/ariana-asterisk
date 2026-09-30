@@ -354,6 +354,15 @@ function attachAgentWebSocket(linkedid, ws, options = {}) {
         return false;
     }
 
+    const agentId = options.agentId ? String(options.agentId) : null;
+    if (agentId) {
+        for (const [id, otherSession] of mediaSessionsById.entries()) {
+            if (otherSession !== session && otherSession.status !== "closed" && String(otherSession.activeAgentId || "") === agentId) {
+                closeMediaSession(id, "agent_new_call_started").catch(() => {});
+            }
+        }
+    }
+
     if (session.agentWs && session.agentWs.readyState === 1) {
         session.agentWs.close(1000, "agent_replaced");
     }
