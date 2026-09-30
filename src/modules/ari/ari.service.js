@@ -133,6 +133,11 @@ async function handleRawEvent(message) {
 
     const type = String(event.type || "");
     const channel = event.channel || {};
+    const channelName = String(channel.name || "");
+
+    if (channelName.startsWith("UnicastRTP/")) {
+        return;
+    }
 
     switch (type) {
         case "StasisStart": {
@@ -557,6 +562,11 @@ function normalizeChannel(channel = {}) {
 
 function notifyLaravel(session, event, trunkEventName, dialStatus = "") {
     if (!env.ariLaravelEventsEnabled) {
+        return;
+    }
+
+    const channelName = String(session?.channel?.name || event?.channel?.name || session?.channelId || "");
+    if (channelName.startsWith("UnicastRTP/")) {
         return;
     }
 

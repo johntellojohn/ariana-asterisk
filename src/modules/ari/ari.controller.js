@@ -465,4 +465,6 @@ module.exports = {
     playCallMedia,
     hangupSession,
     hangupCall,
+    startCallWaiting,
+    stopCallWaiting,
 };
