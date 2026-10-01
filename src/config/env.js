@@ -133,7 +133,7 @@ const env = {
     pbxMaxEvents: toNumber(process.env.PBX_MAX_EVENTS, 300),
     pbxOriginateContext: process.env.PBX_ORIGINATE_CONTEXT || "from-internal",
     pbxOriginatePriority: toNumber(process.env.PBX_ORIGINATE_PRIORITY, 1),
-    pbxOriginateTimeoutMs: toNumber(process.env.PBX_ORIGINATE_TIMEOUT_MS, 30000),
+    pbxOriginateTimeoutMs: toNumber(process.env.PBX_ORIGINATE_TIMEOUT_MS, 60000),
     pbxCallerIdPrefix: process.env.PBX_CALLER_ID_PREFIX || "Ariana",
     pbxDefaultCallerIdNumber: process.env.PBX_DEFAULT_CALLER_ID_NUMBER || "",
     pbxDirectTrunkEndpoint: process.env.PBX_DIRECT_TRUNK_ENDPOINT || "",
