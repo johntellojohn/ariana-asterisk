@@ -166,6 +166,10 @@ class OutboundCallService {
             return null;
         }
 
+        if (event.linkedid || event.uniqueid || event.channel) {
+            this.linkCall(call, event);
+        }
+
         return {
             direction: "OUTBOUND",
             outbound_call_id: call.outboundCallId,
@@ -365,7 +369,47 @@ class OutboundCallService {
             return channels.some((channel) => channel.startsWith(call.channelPrefix));
         });
 
-        return candidates.length === 1 ? candidates[0] : null;
+        if (candidates.length === 1) {
+            return candidates[0];
+        }
+
+        if (candidates.length === 0) {
+            const fallbackCandidates = [...this.callsById.values()].filter((call) => {
+                if (FINAL_STATUSES.has(call.status)) {
+                    return false;
+                }
+
+                const cleanPhone = String(call.phoneNumber || "").replace(/\D/g, "");
+                if (!cleanPhone || cleanPhone.length < 6) {
+                    return false;
+                }
+
+                const shortPhone = cleanPhone.startsWith("593") ? "0" + cleanPhone.slice(3) : cleanPhone;
+                const intlPhone = cleanPhone.startsWith("0") ? "593" + cleanPhone.slice(1) : cleanPhone;
+
+                const matchesChannel = channels.some((channel) => {
+                    const cleanChannel = channel.replace(/[@/;-].*$/, "");
+                    return cleanChannel.includes(cleanPhone) || cleanChannel.includes(shortPhone) || cleanChannel.includes(intlPhone);
+                });
+
+                if (matchesChannel) {
+                    return true;
+                }
+
+                const dest = String(event.destination || "").replace(/\D/g, "");
+                if (dest && (dest === cleanPhone || dest === shortPhone || dest === intlPhone)) {
+                    return true;
+                }
+
+                return false;
+            });
+
+            if (fallbackCandidates.length === 1) {
+                return fallbackCandidates[0];
+            }
+        }
+
+        return null;
     }
 
     linkCall(call, event = {}) {

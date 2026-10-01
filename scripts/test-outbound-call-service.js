@@ -156,6 +156,19 @@ async function run() {
     assert.strictEqual(earlyMetadata.phone_number, "0996432301");
     assert.strictEqual(earlyMetadata.from_number, "1800-CORE-01");
 
+    // Test fallback matching when event comes on PJSIP trunk channel with destination
+    const pjsipMetadata = pbx.metadataResolver({
+        channel: "PJSIP/0963155600-0000003f",
+        destination: "0996432301",
+        event: "dialbegin",
+        linkedid: "pbx-linked-outbound-1",
+    });
+
+    assert.ok(pjsipMetadata);
+    assert.strictEqual(pjsipMetadata.direction, "OUTBOUND");
+    assert.strictEqual(pjsipMetadata.outbound_call_id, created.outbound_call_id);
+    assert.strictEqual(pjsipMetadata.external_call_id, "pbx-linked-outbound-1");
+
     pbx.emit({
         event: "varset",
         variable: "ARIANA_OUTBOUND_CALL_ID",

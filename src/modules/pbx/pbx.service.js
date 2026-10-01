@@ -219,8 +219,8 @@ function handleManagerEvent(event) {
     updateCallSummary(normalized);
     logCallSummary(normalized.linkedid);
     notifyRedirectStasisEarlyEnd(normalized);
-    notifyLaravel(normalized);
     lifecycleEvents.emit("manager-event", normalized);
+    notifyLaravel(normalized);
 }
 
 function normalizeEventName(event) {
