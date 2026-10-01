@@ -360,11 +360,11 @@ async function startCallWaiting(req, res, next) {
         const targetLinkedid = String(req.params.linkedid || "").trim();
         let session = ariService.getSessionByLinkedId(targetLinkedid);
 
-        if (!session && env.ariStasisRedirectEnabled && typeof pbxService.redirectCallToStasis === "function") {
+        if ((!session || !session.inStasis) && env.ariStasisRedirectEnabled && typeof pbxService.redirectCallToStasis === "function") {
             await pbxService.redirectCallToStasis(targetLinkedid).catch(() => {});
             for (let i = 0; i < 20; i++) {
                 session = ariService.getSessionByLinkedId(targetLinkedid);
-                if (session) break;
+                if (session && session.inStasis) break;
                 await new Promise((r) => setTimeout(r, 50));
             }
         }

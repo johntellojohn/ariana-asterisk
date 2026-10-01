@@ -152,14 +152,27 @@ async function startMediaSessionByLinkedId(linkedid, options = {}) {
 
     let baseSession = ariService.getSessionByLinkedId(targetLinkedid);
 
-    if (!baseSession && env.ariStasisRedirectEnabled) {
+    if ((!baseSession || !baseSession.inStasis) && env.ariStasisRedirectEnabled) {
+        console.log("[ari:media] redirecting call to Stasis", {
+            targetLinkedid,
+            hasSession: Boolean(baseSession),
+            inStasis: Boolean(baseSession?.inStasis),
+        });
         await redirectTrackedCallToStasis(targetLinkedid);
         baseSession = await waitForAriSession(targetLinkedid, env.ariStasisWaitMs);
     }
 
     if (!baseSession) {
-        const error = new Error("ARI session not found for linkedid");
+        const error = new Error("ARI session not found for linkedid: " + targetLinkedid);
         error.status = 404;
+        throw error;
+    }
+
+    if (!baseSession.inStasis) {
+        const error = new Error(
+            `El canal (${baseSession.channelId || targetLinkedid}) no ingresó a Stasis. Verifica que el contexto [${env.ariStasisContext}] esté configurado en extensions_custom.conf de Asterisk.`
+        );
+        error.status = 422;
         throw error;
     }
 
@@ -230,14 +243,15 @@ async function waitForAriSession(linkedid, timeoutMs) {
     while (Date.now() - startedAt <= maxWait) {
         const session = ariService.getSessionByLinkedId(linkedid);
 
-        if (session) {
+        if (session && session.inStasis) {
             return session;
         }
 
         await delay(35);
     }
 
-    return null;
+    const fallback = ariService.getSessionByLinkedId(linkedid);
+    return fallback && fallback.inStasis ? fallback : null;
 }
 
 function delay(ms) {
