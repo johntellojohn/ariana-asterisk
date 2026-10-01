@@ -1714,11 +1714,76 @@ async function pauseQueueMember(arg1, arg2, arg3, arg4) {
         }
     }
 
+    try {
+        await runAmiAction({
+            Action: "DBPut",
+            Family: "eva_presence",
+            Key: cleanExt,
+            Val: isPaused ? "0" : "1",
+        });
+    } catch (dbErr) {
+        console.warn("[pbx:queue] DBPut eva_presence failed", {
+            extension: cleanExt,
+            error: dbErr.message,
+        });
+    }
+
     return {
         extension: cleanExt,
         paused: isPaused,
         reason: pauseReason,
         queue: queue || "all",
+        results,
+    };
+}
+
+async function syncQueuePresence({ online_extensions = [], all_extensions = [], queue = "650" }) {
+    ensureReady();
+
+    const cleanOnline = (Array.isArray(online_extensions) ? online_extensions : [])
+        .map((ext) => extractExtensionNumber(ext))
+        .filter(Boolean);
+
+    let cleanAll = (Array.isArray(all_extensions) ? all_extensions : [])
+        .map((ext) => extractExtensionNumber(ext))
+        .filter(Boolean);
+
+    if (cleanAll.length === 0) {
+        cleanAll = ["801", "802", "803", "804"];
+    }
+
+    for (const onExt of cleanOnline) {
+        if (!cleanAll.includes(onExt)) {
+            cleanAll.push(onExt);
+        }
+    }
+
+    console.log("[pbx:queue] syncing queue presence", {
+        queue,
+        online: cleanOnline,
+        all: cleanAll,
+    });
+
+    const results = [];
+    for (const ext of cleanAll) {
+        const isOnline = cleanOnline.includes(ext);
+        try {
+            const res = await pauseQueueMember({
+                extension: ext,
+                paused: !isOnline,
+                reason: isOnline ? "online_eva" : "offline_eva",
+                queue,
+            });
+            results.push({ extension: ext, isOnline, ok: true, details: res });
+        } catch (err) {
+            results.push({ extension: ext, isOnline, ok: false, error: err.message });
+        }
+    }
+
+    return {
+        queue,
+        online: cleanOnline,
+        all: cleanAll,
         results,
     };
 }
@@ -1753,6 +1818,7 @@ module.exports = {
     originateOutboundApplication,
     hangupChannelByName,
     pauseQueueMember,
+    syncQueuePresence,
     getQueueStatus,
     extractExtensionNumber,
     __test: {

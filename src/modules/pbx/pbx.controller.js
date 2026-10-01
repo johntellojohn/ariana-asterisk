@@ -185,6 +185,23 @@ async function queueStatus(req, res, next) {
     }
 }
 
+async function syncQueuePresence(req, res, next) {
+    try {
+        const response = await pbxService.syncQueuePresence({
+            online_extensions: req.body.online_extensions || req.body.onlineExtensions,
+            all_extensions: req.body.all_extensions || req.body.allExtensions,
+            queue: req.body.queue,
+        });
+
+        res.json({
+            ok: true,
+            data: response,
+        });
+    } catch (error) {
+        next(error);
+    }
+}
+
 module.exports = {
     health,
     callEvents,
@@ -198,5 +215,6 @@ module.exports = {
     originateExternal,
     originateDirect,
     queuePause,
+    syncQueuePresence,
     queueStatus,
 };

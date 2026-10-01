@@ -19,6 +19,7 @@ router.post("/originate/extension", pbxController.originateExtension);
 router.post("/originate/external", pbxController.originateExternal);
 router.post("/originate/direct", pbxController.originateDirect);
 router.post("/queue/pause", pbxController.queuePause);
+router.post("/queue/sync-presence", pbxController.syncQueuePresence);
 router.get("/queue/status", pbxController.queueStatus);
 router.get("/queue/status/:queue", pbxController.queueStatus);
 
