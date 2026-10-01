@@ -210,6 +210,27 @@ async function startMediaSessionByLinkedId(linkedid, options = {}) {
         mediaSession.status = "ready";
         mediaSession.updatedAt = new Date().toISOString();
 
+        const call = typeof pbxService.getCallByLinkedId === "function" ? pbxService.getCallByLinkedId(targetLinkedid) : null;
+        const agentExt = call?.agentExtension || options.agentExtension || options.agentId || null;
+        if (agentExt && typeof pbxService.pauseQueueMember === "function") {
+            mediaSession.pausedAgentExtension = String(agentExt).trim();
+            mediaSession.pausedQueue = call?.queue || "650";
+            pbxService.pauseQueueMember(mediaSession.pausedAgentExtension, true, "in_call", mediaSession.pausedQueue)
+                .then(() => {
+                    console.log("[ari:media] agent paused in queue during active call", {
+                        agentExt: mediaSession.pausedAgentExtension,
+                        queue: mediaSession.pausedQueue,
+                        linkedid: targetLinkedid,
+                    });
+                })
+                .catch((err) => {
+                    console.warn("[ari:media] failed to pause agent in queue", {
+                        agentExt: mediaSession.pausedAgentExtension,
+                        error: err.message,
+                    });
+                });
+        }
+
         return snapshotMediaSession(mediaSession);
     } catch (error) {
         console.error("[ari:media] start failed", {
@@ -349,6 +370,26 @@ async function closeMediaSession(idOrLinkedid, reason = "closed") {
                 message: error.message,
             });
         }
+    }
+
+    if (session.pausedAgentExtension && typeof pbxService.pauseQueueMember === "function") {
+        const agentExt = session.pausedAgentExtension;
+        const queue = session.pausedQueue || "650";
+        pbxService.pauseQueueMember(agentExt, false, "available", queue)
+            .then(() => {
+                console.log("[ari:media] agent unpaused in queue after call closed", {
+                    agentExt,
+                    queue,
+                    linkedid: session.linkedid,
+                });
+            })
+            .catch((err) => {
+                console.warn("[ari:media] failed to unpause agent in queue", {
+                    agentExt,
+                    error: err.message,
+                });
+            });
+        session.pausedAgentExtension = null;
     }
 
     return snapshotMediaSession(session);

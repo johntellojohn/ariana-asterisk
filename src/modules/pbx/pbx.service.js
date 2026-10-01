@@ -358,9 +358,9 @@ function updateCallSummary(event) {
             break;
         case "bridgeenter":
             call.bridged = true;
-            if (call.status === "IN_PROGRESS" || call.status === "QUEUE_WAITING" || call.status === "RINGING") {
-                call.status = "ANSWER";
-            }
+            call.wasBridged = true;
+            call.answered = true;
+            call.status = "ANSWER";
             break;
         case "queuecallerjoin":
             call.queue = event.queue || call.queue || "";
@@ -385,14 +385,36 @@ function updateCallSummary(event) {
         case "agentcomplete":
             call.status = "COMPLETED";
             break;
-        case "queuecallerabandon":
+        case "queuecallerabandon": {
+            const actions = actionsByLinkedId.get(call.linkedid) || [];
+            const isRedirectedToStasis = actions.some((item) =>
+                item.action === "redirect_stasis_requested" || item.action === "redirect_stasis_sent"
+            );
+            if (isRedirectedToStasis || call.answered || call.bridged || call.wasBridged || call.status === "ANSWER") {
+                console.log("[pbx:queue] queuecallerabandon ignored because call was redirected/answered in Stasis", {
+                    linkedid: call.linkedid,
+                    status: call.status,
+                    answered: call.answered,
+                    bridged: call.bridged,
+                });
+                break;
+            }
             call.status = "ABANDONED";
             break;
-        case "queuecallerleave":
+        }
+        case "queuecallerleave": {
+            const actions = actionsByLinkedId.get(call.linkedid) || [];
+            const isRedirectedToStasis = actions.some((item) =>
+                item.action === "redirect_stasis_requested" || item.action === "redirect_stasis_sent"
+            );
+            if (isRedirectedToStasis || call.answered || call.bridged || call.wasBridged || call.status === "ANSWER") {
+                break;
+            }
             if (call.status === "QUEUE_WAITING") {
                 call.status = "QUEUE_LEFT";
             }
             break;
+        }
         case "hangup":
             call.hangupCause = event.cause || call.hangupCause;
             call.hangupText = event.causeTxt || call.hangupText;
@@ -782,6 +804,10 @@ async function redirectCallToStasis(linkedid) {
         priority: env.ariStasisPriority,
     });
 
+    call.answered = true;
+    call.status = "ANSWER";
+    call.result = "answered";
+
     rememberAction(linkedid, "redirect_stasis_sent", {
         channel,
         context: env.ariStasisContext,
@@ -1001,6 +1027,17 @@ function notifyLaravel(event) {
         return;
     }
 
+    if (isQueueRedirectExitEvent(event)) {
+        if (env.pbxLogLaravelCallbacks) {
+            console.log("[pbx:laravel] queue redirect exit event skipped", {
+                linkedid: event.linkedid || null,
+                event: event.event || null,
+                channel: event.channel || null,
+            });
+        }
+        return;
+    }
+
     if (isSecondaryRedirectLifecycleEvent(event)) {
         if (env.pbxLogLaravelCallbacks) {
             console.log("[pbx:laravel] secondary redirect event skipped", {
@@ -1199,7 +1236,7 @@ function redirectStasisEarlyEndDecision(event) {
         return { shouldNotify: false };
     }
 
-    if (call.answered || call.bridged) {
+    if (call.answered || call.bridged || call.wasBridged || call.status === "ANSWER" || call.result === "answered") {
         return { shouldNotify: false };
     }
 
@@ -1219,6 +1256,23 @@ function isRedirectCancelEvent(event) {
     return String(event.event || "").toLowerCase() === "dialend" &&
         String(event.dialStatus || "").toUpperCase() === "CANCEL" &&
         actions.some((item) => item.action === "redirect_stasis_requested" || item.action === "redirect_stasis_sent");
+}
+
+function isQueueRedirectExitEvent(event) {
+    const eventName = String(event.event || "").toLowerCase();
+    if (!["queuecallerabandon", "queuecallerleave"].includes(eventName) || !event.linkedid) {
+        return false;
+    }
+
+    const actions = actionsByLinkedId.get(event.linkedid) || [];
+    const isRedirected = actions.some((item) =>
+        item.action === "redirect_stasis_requested" || item.action === "redirect_stasis_sent"
+    );
+
+    const call = callsByLinkedId.get(event.linkedid);
+    const isAnsweredOrBridged = Boolean(call?.answered || call?.bridged || call?.wasBridged || call?.status === "ANSWER");
+
+    return isRedirected || isAnsweredOrBridged;
 }
 
 function isSecondaryRedirectLifecycleEvent(event) {
