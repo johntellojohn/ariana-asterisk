@@ -154,15 +154,19 @@ function handleManagerEvent(event) {
         event.interface ||
         event.Interface ||
         "";
-    const agentExtension = extractExtensionNumber(
-        agentCalledRaw ||
-        event.destination ||
-        event.Destination ||
-        event.exten ||
-        event.Exten ||
-        ""
-    );
     const queueName = String(event.queue || event.Queue || "").trim();
+    let agentExtension = extractExtensionNumber(agentCalledRaw);
+    if (!agentExtension && (event.destchannel || event.DestChannel)) {
+        agentExtension = extractExtensionNumber(event.destchannel || event.DestChannel);
+    }
+    const destCandidate = event.destination || event.Destination || "";
+    if (!agentExtension && destCandidate && String(destCandidate) !== queueName) {
+        agentExtension = extractExtensionNumber(destCandidate);
+    }
+    const extenCandidate = event.exten || event.Exten || "";
+    if (!agentExtension && extenCandidate && String(extenCandidate) !== queueName) {
+        agentExtension = extractExtensionNumber(extenCandidate);
+    }
 
     const normalized = {
         time: now,
@@ -1654,7 +1658,20 @@ function ensureAmiInstance() {
     }
 }
 
-async function pauseQueueMember({ extension, paused = true, reason = "", queue = "" }) {
+async function pauseQueueMember(arg1, arg2, arg3, arg4) {
+    let extension, paused, reason, queue;
+    if (arg1 && typeof arg1 === "object" && !Array.isArray(arg1)) {
+        extension = arg1.extension;
+        paused = arg1.paused ?? true;
+        reason = arg1.reason || "";
+        queue = arg1.queue || "";
+    } else {
+        extension = arg1;
+        paused = arg2 ?? true;
+        reason = arg3 || "";
+        queue = arg4 || "";
+    }
+
     validateRequired({ extension });
     ensureReady();
 
@@ -1672,6 +1689,8 @@ async function pauseQueueMember({ extension, paused = true, reason = "", queue =
 
     const candidates = [
         `Local/${cleanExt}@from-queue/n`,
+        `Local/${cleanExt}@from-queue`,
+        `Local/${cleanExt}@from-internal/n`,
         cleanExt,
         `PJSIP/${cleanExt}`,
     ];

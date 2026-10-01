@@ -211,11 +211,28 @@ async function startMediaSessionByLinkedId(linkedid, options = {}) {
         mediaSession.updatedAt = new Date().toISOString();
 
         const call = typeof pbxService.getCallByLinkedId === "function" ? pbxService.getCallByLinkedId(targetLinkedid) : null;
-        const agentExt = call?.agentExtension || options.agentExtension || options.agentId || null;
+        let agentExt = options.agent_extension || options.agentExtension || options.extension || call?.agentExtension || null;
+        if ((!agentExt || agentExt === call?.queue) && Array.isArray(call?.channels)) {
+            for (const ch of call.channels) {
+                const match = String(ch).match(/Local\/(\d{3,6})@/i);
+                if (match) {
+                    agentExt = match[1];
+                    break;
+                }
+            }
+        }
+        if (!agentExt && options.agentId && String(options.agentId).length >= 3) {
+            agentExt = String(options.agentId);
+        }
         if (agentExt && typeof pbxService.pauseQueueMember === "function") {
             mediaSession.pausedAgentExtension = String(agentExt).trim();
-            mediaSession.pausedQueue = call?.queue || "650";
-            pbxService.pauseQueueMember(mediaSession.pausedAgentExtension, true, "in_call", mediaSession.pausedQueue)
+            mediaSession.pausedQueue = call?.queue || options.queue || "650";
+            pbxService.pauseQueueMember({
+                extension: mediaSession.pausedAgentExtension,
+                paused: true,
+                reason: "in_call",
+                queue: mediaSession.pausedQueue,
+            })
                 .then(() => {
                     console.log("[ari:media] agent paused in queue during active call", {
                         agentExt: mediaSession.pausedAgentExtension,
@@ -375,7 +392,12 @@ async function closeMediaSession(idOrLinkedid, reason = "closed") {
     if (session.pausedAgentExtension && typeof pbxService.pauseQueueMember === "function") {
         const agentExt = session.pausedAgentExtension;
         const queue = session.pausedQueue || "650";
-        pbxService.pauseQueueMember(agentExt, false, "available", queue)
+        pbxService.pauseQueueMember({
+            extension: agentExt,
+            paused: false,
+            reason: "available",
+            queue,
+        })
             .then(() => {
                 console.log("[ari:media] agent unpaused in queue after call closed", {
                     agentExt,
