@@ -347,7 +347,10 @@ function updateCallSummary(event) {
             break;
         case "dialend":
             if (event.dialStatus) {
-                call.status = event.dialStatus;
+                const isSubChannel = String(event.channel || "").startsWith("Local/") || String(event.destChannel || "").startsWith("Local/");
+                if (!isSubChannel || event.dialStatus === "ANSWER") {
+                    call.status = event.dialStatus;
+                }
             }
             if (event.dialStatus === "ANSWER") {
                 call.answered = true;
@@ -740,14 +743,19 @@ async function redirectCallToStasis(linkedid) {
     }
 
     if (isFinalCallStatus(call.status)) {
-        const error = new Error(`La llamada PBX ya no esta activa (${call.status}). No se puede redirigir a ARI/Stasis.`);
-        error.status = 409;
-        rememberAction(linkedid, "redirect_stasis_rejected_final_status", {
-            status: call.status,
-            result: call.result,
-            channels: call.channels,
-        });
-        throw error;
+        const primary = primaryCallChannel(call);
+        if (primary && !isCallPrimaryChannelHungUp(call)) {
+            console.log("[pbx:action] call status was " + call.status + " but primary channel " + primary + " is still active; proceeding with Stasis redirect");
+        } else {
+            const error = new Error(`La llamada PBX ya no esta activa (${call.status}). No se puede redirigir a ARI/Stasis.`);
+            error.status = 409;
+            rememberAction(linkedid, "redirect_stasis_rejected_final_status", {
+                status: call.status,
+                result: call.result,
+                channels: call.channels,
+            });
+            throw error;
+        }
     }
 
     const channel = primaryCallChannel(call);
@@ -783,6 +791,25 @@ async function redirectCallToStasis(linkedid) {
 }
 
 function primaryCallChannel(call) {
+    if (!call) return "";
+
+    // 1. External non-local channel (e.g. PJSIP/..., SIP/..., DAHDI/...)
+    const external = (call.channels || []).find(
+        (ch) => ch && !ch.startsWith("Local/") && !ch.startsWith("UnicastRTP/")
+    );
+    if (external) {
+        return external;
+    }
+
+    // 2. Non-local dialbegin channel
+    const nonLocalDialBegin = [...call.events]
+        .reverse()
+        .find((event) => event.event === "dialbegin" && event.channel && !event.channel.startsWith("Local/"));
+    if (nonLocalDialBegin?.channel) {
+        return nonLocalDialBegin.channel;
+    }
+
+    // 3. Fallback
     const dialBegin = [...call.events]
         .reverse()
         .find((event) => event.event === "dialbegin" && event.channel);
@@ -935,6 +962,23 @@ function buildDiagnosis({
 }
 
 function notifyLaravel(event) {
+    if (isSubChannelEvent(event)) {
+        const eventName = String(event.event || "").toLowerCase();
+        const dialStatus = String(event.dialStatus || "").toUpperCase();
+
+        if (["hangup", "hanguprequest", "softhanguprequest"].includes(eventName) || (eventName === "dialend" && dialStatus !== "ANSWER")) {
+            if (env.pbxLogLaravelCallbacks) {
+                console.log("[pbx:laravel] subchannel non-terminal event skipped", {
+                    linkedid: event.linkedid || null,
+                    event: event.event || null,
+                    channel: event.channel || null,
+                    dialStatus: event.dialStatus || null,
+                });
+            }
+            return;
+        }
+    }
+
     if (isRedirectCancelEvent(event)) {
         if (env.pbxLogLaravelCallbacks) {
             console.log("[pbx:laravel] redirect cancel event skipped", {
@@ -1203,9 +1247,25 @@ function isCallPrimaryChannelHungUp(call) {
     );
 }
 
+function isSubChannelEvent(event) {
+    const channel = String(event?.channel || "");
+    const destChannel = String(event?.destChannel || "");
+    return (
+        channel.startsWith("Local/") ||
+        channel.startsWith("UnicastRTP/") ||
+        destChannel.startsWith("Local/") ||
+        destChannel.startsWith("UnicastRTP/")
+    );
+}
+
 function isNonTerminalHangupEvent(event, call) {
     if (!call || !event) {
         return false;
+    }
+
+    const channel = String(event.channel || "");
+    if (channel.startsWith("Local/") || channel.startsWith("UnicastRTP/")) {
+        return true;
     }
 
     if (isExternalMediaLifecycleEvent(event) || isSecondaryRedirectLifecycleEvent(event)) {
@@ -1215,7 +1275,6 @@ function isNonTerminalHangupEvent(event, call) {
     const actions = actionsByLinkedId.get(event.linkedid) || [];
     const redirectSent = actions.some((item) => item.action === "connect_extension_redirect_sent");
     const primary = primaryCallChannel(call);
-    const channel = String(event.channel || "");
 
     if (redirectSent && primary && channel && channel !== primary) {
         return true;
