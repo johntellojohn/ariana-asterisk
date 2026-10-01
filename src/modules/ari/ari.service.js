@@ -771,13 +771,15 @@ async function addChannelToBridgeWithRetry(bridgeId, channelId) {
                 throw error;
             }
 
-            console.warn("[ari] bridge addChannel waiting for Stasis", {
-                channelId,
-                bridgeId,
-                waitedMs: Date.now() - startedAt,
-                status: error?.response?.status,
-                message: error?.response?.data?.message || error?.message,
-            });
+            if (Date.now() - startedAt < 100 || (Date.now() - startedAt) % 1000 < 60) {
+                console.warn("[ari] bridge addChannel waiting for Stasis", {
+                    channelId,
+                    bridgeId,
+                    waitedMs: Date.now() - startedAt,
+                    status: error?.response?.status,
+                    message: error?.response?.data?.message || error?.message,
+                });
+            }
 
             if (Date.now() - startedAt >= maxWait) {
                 break;

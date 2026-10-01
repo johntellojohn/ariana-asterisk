@@ -734,10 +734,20 @@ async function redirectCallToStasis(linkedid) {
         priority: env.ariStasisPriority,
     });
 
-    const call = callsByLinkedId.get(linkedid);
+    const targetLinkedid = String(linkedid || "").trim();
+    let call = callsByLinkedId.get(targetLinkedid);
 
     if (!call) {
-        const error = new Error("PBX call not found");
+        for (const c of callsByLinkedId.values()) {
+            if (c.channels?.includes(targetLinkedid) || c.uniqueid === targetLinkedid) {
+                call = c;
+                break;
+            }
+        }
+    }
+
+    if (!call) {
+        const error = new Error("PBX call not found: " + targetLinkedid);
         error.status = 404;
         throw error;
     }
