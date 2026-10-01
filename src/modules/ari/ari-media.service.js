@@ -17,6 +17,23 @@ const {
 const mediaSessionsById = new Map();
 const mediaSessionsByLinkedId = new Map();
 
+if (typeof pbxService.registerActiveExtensionChecker === "function") {
+    pbxService.registerActiveExtensionChecker((ext) => {
+        const clean = String(ext || "").trim();
+        if (!clean) return false;
+        for (const session of mediaSessionsById.values()) {
+            if (session.status !== "closed") {
+                const pausedExt = String(session.pausedAgentExtension || "").trim();
+                const activeId = String(session.activeAgentId || "").trim();
+                if (pausedExt === clean || activeId === clean) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    });
+}
+
 ariService.onSessionEvent((session, event) => {
     if (!["StasisEnd", "ChannelDestroyed"].includes(event.type)) {
         return;

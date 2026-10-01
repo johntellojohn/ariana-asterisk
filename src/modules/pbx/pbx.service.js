@@ -1737,6 +1737,45 @@ async function pauseQueueMember(arg1, arg2, arg3, arg4) {
     };
 }
 
+let activeExtensionChecker = null;
+
+function registerActiveExtensionChecker(fn) {
+    if (typeof fn === "function") {
+        activeExtensionChecker = fn;
+    }
+}
+
+function isExtensionBusyLocally(extension) {
+    const clean = extractExtensionNumber(extension);
+    if (!clean) return false;
+
+    if (typeof activeExtensionChecker === "function") {
+        try {
+            if (activeExtensionChecker(clean)) {
+                return true;
+            }
+        } catch (_) {}
+    }
+
+    for (const call of callsByLinkedId.values()) {
+        const status = String(call.status || "").toUpperCase();
+        if (status === "ANSWERED" || status === "RINGING" || status === "IN_PROGRESS") {
+            if (call.agentExtension && extractExtensionNumber(call.agentExtension) === clean) {
+                return true;
+            }
+            if (Array.isArray(call.channels)) {
+                for (const ch of call.channels) {
+                    if (String(ch).includes(`/${clean}@`) || String(ch).includes(`/${clean}-`)) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    return false;
+}
+
 async function syncQueuePresence({ online_extensions = [], all_extensions = [], queue = "650" }) {
     ensureReady();
 
@@ -1766,12 +1805,21 @@ async function syncQueuePresence({ online_extensions = [], all_extensions = [], 
 
     const results = [];
     for (const ext of cleanAll) {
-        const isOnline = cleanOnline.includes(ext);
+        let isOnline = cleanOnline.includes(ext);
+
+        if (isOnline && isExtensionBusyLocally(ext)) {
+            console.log("[pbx:queue] keeping extension paused during active call/media session", {
+                extension: ext,
+                queue,
+            });
+            isOnline = false;
+        }
+
         try {
             const res = await pauseQueueMember({
                 extension: ext,
                 paused: !isOnline,
-                reason: isOnline ? "online_eva" : "offline_eva",
+                reason: isOnline ? "online_eva" : "in_call_eva",
                 queue,
             });
             results.push({ extension: ext, isOnline, ok: true, details: res });
@@ -1819,6 +1867,8 @@ module.exports = {
     hangupChannelByName,
     pauseQueueMember,
     syncQueuePresence,
+    registerActiveExtensionChecker,
+    isExtensionBusyLocally,
     getQueueStatus,
     extractExtensionNumber,
     __test: {
