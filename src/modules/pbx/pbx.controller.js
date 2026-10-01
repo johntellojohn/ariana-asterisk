@@ -153,6 +153,38 @@ async function originateDirect(req, res, next) {
     }
 }
 
+async function queuePause(req, res, next) {
+    try {
+        const response = await pbxService.pauseQueueMember({
+            extension: req.body.extension,
+            paused: req.body.paused !== false,
+            reason: req.body.reason,
+            queue: req.body.queue,
+        });
+
+        res.json({
+            ok: true,
+            data: response,
+        });
+    } catch (error) {
+        next(error);
+    }
+}
+
+async function queueStatus(req, res, next) {
+    try {
+        const queue = req.params.queue || req.query.queue;
+        const response = await pbxService.getQueueStatus(queue);
+
+        res.json({
+            ok: true,
+            data: response,
+        });
+    } catch (error) {
+        next(error);
+    }
+}
+
 module.exports = {
     health,
     callEvents,
@@ -165,4 +197,6 @@ module.exports = {
     originateExtension,
     originateExternal,
     originateDirect,
+    queuePause,
+    queueStatus,
 };

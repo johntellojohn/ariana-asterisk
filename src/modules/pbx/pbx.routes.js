@@ -18,5 +18,8 @@ router.post("/calls/:linkedid/connect-extension", pbxController.connectCallToExt
 router.post("/originate/extension", pbxController.originateExtension);
 router.post("/originate/external", pbxController.originateExternal);
 router.post("/originate/direct", pbxController.originateDirect);
+router.post("/queue/pause", pbxController.queuePause);
+router.get("/queue/status", pbxController.queueStatus);
+router.get("/queue/status/:queue", pbxController.queueStatus);
 
 module.exports = router;
