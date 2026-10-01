@@ -10,6 +10,16 @@ const trackedEvents = new Set([
     "bridgeenter",
     "bridgeleave",
     "hangup",
+    "queuecallerjoin",
+    "queuecallerleave",
+    "queuecallerabandon",
+    "agentcalled",
+    "agentconnect",
+    "agentcomplete",
+    "agentdump",
+    "agentringernoanswer",
+    "queuememberpaused",
+    "queuememberpause",
 ]);
 const conciseRawEvents = new Set([
     "dialbegin",
@@ -22,6 +32,13 @@ const conciseRawEvents = new Set([
     "softhanguprequest",
     "newchannel",
     "newstate",
+    "queuecallerjoin",
+    "queuecallerleave",
+    "queuecallerabandon",
+    "agentcalled",
+    "agentconnect",
+    "agentcomplete",
+    "queuememberpaused",
 ]);
 
 let ami = null;
@@ -96,6 +113,17 @@ function stop() {
     connected = false;
 }
 
+function extractExtensionNumber(value) {
+    if (!value) {
+        return "";
+    }
+
+    const text = String(value).trim();
+    const match = text.match(/(?:Local\/|PJSIP\/|SIP\/)?(\d{3,4})(?:@|\b)/i);
+
+    return match ? match[1] : "";
+}
+
 function handleManagerEvent(event) {
     const eventName = normalizeEventName(event);
     const raw = normalizeRawEvent(event, eventName);
@@ -114,6 +142,28 @@ function handleManagerEvent(event) {
     const now = new Date().toISOString();
     lastAmiEventTime = now;
 
+    const agentCalledRaw =
+        event.agentcalled ||
+        event.AgentCalled ||
+        event.agentname ||
+        event.AgentName ||
+        event.membername ||
+        event.MemberName ||
+        event.member ||
+        event.Member ||
+        event.interface ||
+        event.Interface ||
+        "";
+    const agentExtension = extractExtensionNumber(
+        agentCalledRaw ||
+        event.destination ||
+        event.Destination ||
+        event.exten ||
+        event.Exten ||
+        ""
+    );
+    const queueName = String(event.queue || event.Queue || "").trim();
+
     const normalized = {
         time: now,
         event: eventName,
@@ -127,6 +177,7 @@ function handleManagerEvent(event) {
             event.DialString ||
             event.exten ||
             event.Exten ||
+            agentExtension ||
             "",
         destChannel: event.destchannel || event.DestChannel || "",
         dialStatus: event.dialstatus || event.DialStatus || "",
@@ -144,6 +195,14 @@ function handleManagerEvent(event) {
             event.causetxt ||
             event.CauseTxt ||
             "",
+        queue: queueName,
+        agentCalled: agentCalledRaw,
+        agentExtension,
+        queuePosition: event.position || event.Position || "",
+        queueCount: event.count || event.Count || "",
+        holdTime: event.holdtime || event.HoldTime || "",
+        talkTime: event.talktime || event.TalkTime || "",
+        reason: event.reason || event.Reason || "",
     };
 
     logTrackedEvent(normalized);
@@ -296,8 +355,39 @@ function updateCallSummary(event) {
             break;
         case "bridgeenter":
             call.bridged = true;
-            if (call.status === "IN_PROGRESS") {
+            if (call.status === "IN_PROGRESS" || call.status === "QUEUE_WAITING" || call.status === "RINGING") {
                 call.status = "ANSWER";
+            }
+            break;
+        case "queuecallerjoin":
+            call.queue = event.queue || call.queue || "";
+            call.queuePosition = event.queuePosition || call.queuePosition || "";
+            if (call.status === "IN_PROGRESS" || !call.status) {
+                call.status = "QUEUE_WAITING";
+            }
+            break;
+        case "agentcalled":
+            call.queue = event.queue || call.queue || "";
+            call.agentExtension = event.agentExtension || call.agentExtension || "";
+            call.agentCalled = event.agentCalled || call.agentCalled || "";
+            call.to = event.agentExtension || call.to || "";
+            call.status = "RINGING";
+            break;
+        case "agentconnect":
+            call.queue = event.queue || call.queue || "";
+            call.agentExtension = event.agentExtension || call.agentExtension || "";
+            call.answered = true;
+            call.status = "ANSWER";
+            break;
+        case "agentcomplete":
+            call.status = "COMPLETED";
+            break;
+        case "queuecallerabandon":
+            call.status = "ABANDONED";
+            break;
+        case "queuecallerleave":
+            if (call.status === "QUEUE_WAITING") {
+                call.status = "QUEUE_LEFT";
             }
             break;
         case "hangup":
@@ -333,6 +423,22 @@ function buildCallResult(call) {
 
     if (call.answered || call.bridged || call.status === "ANSWER") {
         return "answered";
+    }
+
+    if (call.status === "RINGING") {
+        return "ringing";
+    }
+
+    if (call.status === "QUEUE_WAITING") {
+        return "queue_waiting";
+    }
+
+    if (call.status === "ABANDONED") {
+        return "abandoned";
+    }
+
+    if (call.status === "COMPLETED") {
+        return "completed";
     }
 
     if (call.status === "BUSY") {
@@ -1425,6 +1531,65 @@ function ensureAmiInstance() {
     }
 }
 
+async function pauseQueueMember({ extension, paused = true, reason = "", queue = "" }) {
+    validateRequired({ extension });
+    ensureReady();
+
+    const cleanExt = extractExtensionNumber(extension) || String(extension).trim();
+    const isPaused = Boolean(paused);
+    const pauseFlag = isPaused ? "1" : "0";
+    const pauseReason = String(reason || (isPaused ? "paused_by_eva" : "available")).trim();
+
+    console.log("[pbx:queue] queue pause requested", {
+        extension: cleanExt,
+        paused: isPaused,
+        reason: pauseReason,
+        queue: queue || "all",
+    });
+
+    const candidates = [
+        `Local/${cleanExt}@from-queue/n`,
+        cleanExt,
+        `PJSIP/${cleanExt}`,
+    ];
+
+    const results = [];
+    for (const iface of candidates) {
+        try {
+            const action = {
+                Action: "QueuePause",
+                Interface: iface,
+                Paused: pauseFlag,
+                Reason: pauseReason,
+            };
+            if (queue) {
+                action.Queue = String(queue).trim();
+            }
+            const response = await runAmiAction(action);
+            results.push({ interface: iface, ok: true, response });
+        } catch (err) {
+            results.push({ interface: iface, ok: false, error: err.message });
+        }
+    }
+
+    return {
+        extension: cleanExt,
+        paused: isPaused,
+        reason: pauseReason,
+        queue: queue || "all",
+        results,
+    };
+}
+
+async function getQueueStatus(queue = "") {
+    ensureReady();
+    const action = { Action: "QueueStatus" };
+    if (queue) {
+        action.Queue = String(queue).trim();
+    }
+    return runAmiAction(action);
+}
+
 module.exports = {
     start,
     stop,
@@ -1445,6 +1610,9 @@ module.exports = {
     originateDirect,
     originateOutboundApplication,
     hangupChannelByName,
+    pauseQueueMember,
+    getQueueStatus,
+    extractExtensionNumber,
     __test: {
         updateCallSummary,
         resetCallTracking() {
