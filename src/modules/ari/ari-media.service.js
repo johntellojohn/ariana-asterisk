@@ -5,6 +5,7 @@ const env = require("../../config/env");
 const ariService = require("./ari.service");
 const disconnectToneDetector = require("./disconnect-tone-detector");
 const pbxService = require("../pbx/pbx.service");
+const outboundCallService = require("../outbound/outbound-call.service");
 const laravelService = require("../laravel/laravel.service");
 const { CallRecording } = require("../calls/call-recording");
 const {
@@ -167,16 +168,33 @@ async function startMediaSessionByLinkedId(linkedid, options = {}) {
         return snapshotMediaSession(existing);
     }
 
-    let baseSession = ariService.getSessionByLinkedId(targetLinkedid);
+    const outboundKey = options.outboundCallId || options.outbound_call_id || null;
+    const isOutbound =
+        String(options.direction || "").toUpperCase() === "OUTBOUND" ||
+        Boolean(outboundKey) ||
+        (typeof outboundCallService?.isOutboundLinkedId === "function" && outboundCallService.isOutboundLinkedId(targetLinkedid));
 
-    if ((!baseSession || !baseSession.inStasis) && env.ariStasisRedirectEnabled) {
+    let baseSession = ariService.getSessionByLinkedId(targetLinkedid);
+    if (!baseSession && outboundKey) {
+        baseSession = ariService.getSessionByLinkedId(outboundKey);
+    }
+
+    if ((!baseSession || !baseSession.inStasis) && env.ariStasisRedirectEnabled && !isOutbound) {
         console.log("[ari:media] redirecting call to Stasis", {
             targetLinkedid,
             hasSession: Boolean(baseSession),
             inStasis: Boolean(baseSession?.inStasis),
         });
         await redirectTrackedCallToStasis(targetLinkedid);
-        baseSession = await waitForAriSession(targetLinkedid, env.ariStasisWaitMs);
+        baseSession = await waitForAriSession(targetLinkedid, env.ariStasisWaitMs, outboundKey);
+    } else if (isOutbound && (!baseSession || !baseSession.inStasis)) {
+        console.log("[ari:media] waiting for outbound call to enter Stasis without redirect", {
+            targetLinkedid,
+            outboundKey,
+            hasSession: Boolean(baseSession),
+            inStasis: Boolean(baseSession?.inStasis),
+        });
+        baseSession = await waitForAriSession(targetLinkedid, env.ariStasisWaitMs, outboundKey);
     }
 
     if (!baseSession) {
@@ -291,12 +309,15 @@ async function redirectTrackedCallToStasis(linkedid) {
     }
 }
 
-async function waitForAriSession(linkedid, timeoutMs) {
+async function waitForAriSession(linkedid, timeoutMs, fallbackKey = null) {
     const startedAt = Date.now();
     const maxWait = Math.max(0, Number(timeoutMs || 0));
 
     while (Date.now() - startedAt <= maxWait) {
-        const session = ariService.getSessionByLinkedId(linkedid);
+        let session = ariService.getSessionByLinkedId(linkedid);
+        if (!session && fallbackKey) {
+            session = ariService.getSessionByLinkedId(fallbackKey);
+        }
 
         if (session && session.inStasis) {
             return session;
@@ -305,7 +326,10 @@ async function waitForAriSession(linkedid, timeoutMs) {
         await delay(35);
     }
 
-    const fallback = ariService.getSessionByLinkedId(linkedid);
+    let fallback = ariService.getSessionByLinkedId(linkedid);
+    if (!fallback && fallbackKey) {
+        fallback = ariService.getSessionByLinkedId(fallbackKey);
+    }
     return fallback && fallback.inStasis ? fallback : null;
 }
 

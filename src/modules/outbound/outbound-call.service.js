@@ -125,6 +125,19 @@ class OutboundCallService {
         return call ? this.snapshot(call) : null;
     }
 
+    getCallByLinkedId(linkedid) {
+        const key = String(linkedid || "").trim();
+        if (!key) return null;
+        const call = this.callsByLinkedId.get(key);
+        return call ? this.snapshot(call) : null;
+    }
+
+    isOutboundLinkedId(linkedid) {
+        const key = String(linkedid || "").trim();
+        if (!key) return false;
+        return this.callsByLinkedId.has(key);
+    }
+
     async hangupOutboundCall(outboundCallId, reason = "outbound_cancelled") {
         const call = this.requireCall(outboundCallId);
 

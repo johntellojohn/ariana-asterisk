@@ -208,6 +208,8 @@ async function startCallMediaSession(req, res, next) {
                 agentId: req.body.agent_id || req.body.agentId || null,
                 tenant: req.body.tenant || req.body.database || null,
                 callbackUrl: req.body.callback_url || req.body.callbackUrl || null,
+                direction: req.body.direction || null,
+                outboundCallId: req.body.outbound_call_id || req.body.outboundCallId || null,
                 transcribeRecording: booleanInput(
                     req.body,
                     ["transcribe_recording", "transcribeRecording"],

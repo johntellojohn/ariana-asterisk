@@ -1757,9 +1757,15 @@ function isExtensionBusyLocally(extension) {
         } catch (_) {}
     }
 
+    const now = Date.now();
     for (const call of callsByLinkedId.values()) {
         const status = String(call.status || "").toUpperCase();
-        if (status === "ANSWERED" || status === "RINGING" || status === "IN_PROGRESS") {
+        if (status === "ANSWER" || status === "ANSWERED" || status === "RINGING" || status === "IN_PROGRESS") {
+            const eventAgeMs = call.lastEventTime ? (now - new Date(call.lastEventTime).getTime()) : Infinity;
+            if (eventAgeMs > 60000) {
+                continue;
+            }
+
             if (call.agentExtension && extractExtensionNumber(call.agentExtension) === clean) {
                 return true;
             }
