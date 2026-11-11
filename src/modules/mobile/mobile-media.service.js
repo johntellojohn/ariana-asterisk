@@ -63,24 +63,24 @@ if (typeof pbxService.onManagerEvent === "function") {
 
         if (["hangup", "bridgeleave"].includes(eventName)) {
             const mediaSession = mobileSessionsByLinkedId.get(String(event.linkedid));
-
             if (mediaSession && mediaSession.status !== "closed") {
                 const channel = String(event.channel || "");
+                // 1. NUNCA cerrar por canales internos de cola (Local/) ni por RTP Unicast
                 if (
+                    channel.startsWith("Local/") ||
                     channel.startsWith("UnicastRTP/") ||
                     (mediaSession.externalChannelId && channel === String(mediaSession.externalChannelId))
                 ) {
                     return;
                 }
-                if (eventName === "bridgeleave") {
-                    if (["pending", "agent_waiting"].includes(mediaSession.status)) {
-                        return;
-                    }
-                    if (mediaSession.channelId && channel && channel !== String(mediaSession.channelId)) {
-                        return;
-                    }
+                // 2. Si la sesión aún se está estableciendo, no colgar por eventos intermedios
+                if (["pending", "agent_waiting"].includes(mediaSession.status)) {
+                    return;
                 }
-
+                // 3. Si ya conocemos el canal principal del cliente/troncal, ignorar hangups de otros canales
+                if (mediaSession.channelId && channel && channel !== String(mediaSession.channelId)) {
+                    return;
+                }
                 setImmediate(() => {
                     closeMediaSession(mediaSession.id, `pbx_${eventName}`).catch((error) => {
                         console.warn("[mobile:media] pbx event auto close failed", {
