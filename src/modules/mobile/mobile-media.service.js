@@ -72,11 +72,13 @@ if (typeof pbxService.onManagerEvent === "function") {
                 ) {
                     return;
                 }
-                if (mediaSession.channelId && channel && channel !== String(mediaSession.channelId)) {
-                    return;
-                }
-                if (eventName === "bridgeleave" && ["pending", "agent_waiting"].includes(mediaSession.status)) {
-                    return;
+                if (eventName === "bridgeleave") {
+                    if (["pending", "agent_waiting"].includes(mediaSession.status)) {
+                        return;
+                    }
+                    if (mediaSession.channelId && channel && channel !== String(mediaSession.channelId)) {
+                        return;
+                    }
                 }
 
                 setImmediate(() => {
@@ -427,6 +429,14 @@ async function closeMediaSession(idOrLinkedid, reason = "closed") {
     session.closeReason = reason;
 
     if (session.agentWs && session.agentWs.readyState === 1) {
+        try {
+            session.agentWs.send(JSON.stringify({
+                type: "hangup",
+                event: "hangup",
+                reason,
+                linkedid: session.linkedid,
+            }));
+        } catch (_) {}
         session.agentWs.close(1000, reason);
     }
     session.agentWs = null;
@@ -682,6 +692,22 @@ function handleRtpPacket(session, packet) {
     session.updatedAt = new Date().toISOString();
 
     const pcm48 = decodeUlawPayloadToPcm48(rtp.payload);
+
+    if (disconnectToneDetector && typeof disconnectToneDetector.track === "function") {
+        const frame = disconnectToneDetector.createFrame(pcm48);
+        const result = disconnectToneDetector.track(session, pcm48, frame, {
+            enabled: true,
+            hasOutput: true,
+        });
+        if (result && result.shouldClose) {
+            console.log("[mobile:media] disconnect tone detected on mobile RTP stream, closing session", {
+                linkedid: session.linkedid,
+                result,
+            });
+            closeMediaSession(session.id, "disconnect_tone_detected").catch(() => {});
+            return;
+        }
+    }
 
     if (session.recording) {
         session.recording.recordCustomerPcm(pcm48, {

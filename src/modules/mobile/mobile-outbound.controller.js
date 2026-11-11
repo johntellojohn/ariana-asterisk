@@ -156,9 +156,9 @@ async function answer(req, res) {
         }
 
         if (!channelToRedirect) {
-            return res.status(404).json({
+            return res.status(400).json({
                 ok: false,
-                error: "No se encontró el canal primario FXO para redirigir.",
+                error: "Falta el canal primario en req.body.channel",
             });
         }
 
@@ -181,12 +181,10 @@ async function answer(req, res) {
 
         return res.json({
             ok: true,
-            message: "Llamada conectada a Stasis móvil exitosamente.",
             ws_url: mediaSession.agentWebSocketUrl,
             data: {
                 linkedid,
                 ws_url: mediaSession.agentWebSocketUrl,
-                mediaSession,
             },
         });
     } catch (error) {
