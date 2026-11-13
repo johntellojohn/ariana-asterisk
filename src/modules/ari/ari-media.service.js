@@ -5,6 +5,8 @@ const env = require("../../config/env");
 const ariService = require("./ari.service");
 const disconnectToneDetector = require("./disconnect-tone-detector");
 const pbxService = require("../pbx/pbx.service");
+const callState = require("../pbx/call-state.service");
+const { isTerminalStatus } = require("../pbx/call-state.service");
 const outboundCallService = require("../outbound/outbound-call.service");
 const laravelService = require("../laravel/laravel.service");
 const { CallRecording } = require("../calls/call-recording");
@@ -299,9 +301,11 @@ async function startMediaSessionByLinkedId(linkedid, options = {}) {
 }
 
 async function redirectTrackedCallToStasis(linkedid) {
+    callState.markStasisRedirectPending(linkedid, Math.max(5000, Number(env.ariStasisWaitMs || 5000) + 2000));
     try {
         await pbxService.redirectCallToStasis(linkedid);
     } catch (error) {
+        callState.clearStasisRedirectPending(linkedid);
         console.warn("[ari:media] redirect to Stasis failed", {
             linkedid,
             message: error.message,
@@ -320,12 +324,20 @@ async function waitForAriSession(linkedid, timeoutMs, fallbackKey = null) {
         }
 
         if (session && session.inStasis) {
+            callState.clearStasisRedirectPending(linkedid);
             return session;
+        }
+
+        const trackedCall = callState.getCall(linkedid);
+        if (trackedCall && isTerminalStatus(trackedCall.status)) {
+            callState.clearStasisRedirectPending(linkedid);
+            return null;
         }
 
         await delay(35);
     }
 
+    callState.clearStasisRedirectPending(linkedid);
     let fallback = ariService.getSessionByLinkedId(linkedid);
     if (!fallback && fallbackKey) {
         fallback = ariService.getSessionByLinkedId(fallbackKey);
@@ -1361,10 +1373,35 @@ function ensureMediaFormatSupported() {
     }
 }
 
+function getMediaStats() {
+    let activeCount = 0;
+    let totalPacketsIn = 0;
+    let totalPacketsOut = 0;
+    let totalDroppedLatency = 0;
+
+    for (const session of mediaSessionsById.values()) {
+        if (session.status !== "closed") {
+            activeCount += 1;
+            totalPacketsIn += Number(session.rtpPacketsReceived || 0);
+            totalPacketsOut += Number(session.rtpPacketsSent || 0);
+            totalDroppedLatency += Number(session.rtpPacketsDroppedLatency || 0);
+        }
+    }
+
+    return {
+        activeCount,
+        totalCachedCount: mediaSessionsById.size,
+        totalPacketsIn,
+        totalPacketsOut,
+        totalDroppedLatency,
+    };
+}
+
 module.exports = {
     startMediaSessionByLinkedId,
     getMediaSession,
     listMediaSessions,
+    getMediaStats,
     closeMediaSession,
     attachAgentWebSocket,
     activateAgentOwner,

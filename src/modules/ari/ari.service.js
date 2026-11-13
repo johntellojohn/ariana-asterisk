@@ -9,8 +9,11 @@ let ws = null;
 let started = false;
 let connected = false;
 let reconnectTimer = null;
+let watchdogTimer = null;
+let gcTimer = null;
 let lastConnectAttemptAt = null;
 let lastEventTime = null;
+let lastPongAt = null;
 let lastError = null;
 
 const sessionsByChannelId = new Map();
@@ -37,6 +40,7 @@ function start() {
     }
 
     connectWebSocket();
+    startWatchdogAndGc();
 
     return getStatus();
 }
@@ -44,6 +48,7 @@ function start() {
 function stop() {
     started = false;
     connected = false;
+    stopWatchdogAndGc();
 
     if (reconnectTimer) {
         clearTimeout(reconnectTimer);
@@ -448,6 +453,7 @@ function getStatus() {
         stasisWaitMs: env.ariStasisWaitMs,
         lastConnectAttemptAt,
         lastEventTime,
+        lastPongAt: lastPongAt ? new Date(lastPongAt).toISOString() : null,
         lastError,
         activeSessions: Array.from(sessionsByChannelId.values())
             .filter((session) => session.status !== "ended")
@@ -959,9 +965,96 @@ function normalizeMedia(media) {
     return value.includes(":") ? value : `sound:${value}`;
 }
 
+function restart() {
+    stop();
+    return start();
+}
+
+function startWatchdogAndGc() {
+    if (!watchdogTimer) {
+        watchdogTimer = setInterval(() => {
+            if (!started || !ws) {
+                return;
+            }
+            if (ws.readyState === WebSocket.OPEN) {
+                if (!ws.__arianaPongBound) {
+                    ws.__arianaPongBound = true;
+                    lastPongAt = Date.now();
+                    ws.on("pong", () => {
+                        lastPongAt = Date.now();
+                    });
+                }
+                try {
+                    ws.ping();
+                } catch (_err) {
+                    // handled below by stale check
+                }
+                const now = Date.now();
+                const lastActivityMs = Math.max(
+                    lastPongAt || 0,
+                    lastEventTime ? Date.parse(lastEventTime) || 0 : 0
+                );
+                if (lastActivityMs > 0 && now - lastActivityMs > 35000) {
+                    console.warn("[ari:watchdog] WebSocket unresponsive to ping/events for >35s; terminating for reconnect");
+                    lastError = "ARI WebSocket watchdog ping timeout";
+                    connected = false;
+                    try {
+                        ws.terminate();
+                    } catch (_err) {
+                        // ignore terminate error
+                    }
+                    scheduleReconnect();
+                }
+            }
+        }, 15000);
+        if (typeof watchdogTimer.unref === "function") {
+            watchdogTimer.unref();
+        }
+    }
+
+    if (!gcTimer) {
+        gcTimer = setInterval(() => {
+            pruneStaleAriSessions();
+        }, 60000);
+        if (typeof gcTimer.unref === "function") {
+            gcTimer.unref();
+        }
+    }
+}
+
+function stopWatchdogAndGc() {
+    if (watchdogTimer) {
+        clearInterval(watchdogTimer);
+        watchdogTimer = null;
+    }
+    if (gcTimer) {
+        clearInterval(gcTimer);
+        gcTimer = null;
+    }
+}
+
+function pruneStaleAriSessions(maxAgeMs = 15 * 60 * 1000) {
+    const cutoff = Date.now() - maxAgeMs;
+    let removed = 0;
+
+    for (const [channelId, session] of sessionsByChannelId.entries()) {
+        if (session.status !== "ended") {
+            continue;
+        }
+        const endedMs = Date.parse(session.endedAt || session.updatedAt || session.createdAt || "");
+        if (Number.isFinite(endedMs) && endedMs < cutoff) {
+            sessionsByChannelId.delete(channelId);
+            removed += 1;
+        }
+    }
+
+    return removed;
+}
+
 module.exports = {
     start,
     stop,
+    restart,
     getStatus,
     getEvents,
     listSessions,

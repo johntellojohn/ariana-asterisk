@@ -2,6 +2,12 @@ const AsteriskManager = require("asterisk-manager");
 const EventEmitter = require("events");
 const env = require("../../config/env");
 const laravelService = require("../laravel/laravel.service");
+const auditLog = require("../audit/audit-log.service");
+const callState = require("./call-state.service");
+const { classifyChannel } = require("./call-state.service");
+const queuePresence = require("./queue-presence.service");
+
+let gcTimer = null;
 
 const trackedEvents = new Set([
     "dialbegin",
@@ -100,10 +106,24 @@ function start() {
     ami.keepConnected();
     started = true;
 
+    if (!gcTimer) {
+        gcTimer = setInterval(() => {
+            pruneStaleTrackingData();
+        }, 60000);
+        if (typeof gcTimer.unref === "function") {
+            gcTimer.unref();
+        }
+    }
+
     return getStatus();
 }
 
 function stop() {
+    if (gcTimer) {
+        clearInterval(gcTimer);
+        gcTimer = null;
+    }
+
     if (ami && typeof ami.disconnect === "function") {
         ami.disconnect();
     }
@@ -111,6 +131,32 @@ function stop() {
     ami = null;
     started = false;
     connected = false;
+}
+
+function restart() {
+    stop();
+    queuePresence.reset();
+    return start();
+}
+
+function pruneStaleTrackingData() {
+    callState.pruneStaleCalls();
+    const cutoffMs = Date.now() - 15 * 60 * 1000;
+
+    for (const [linkedid, call] of callsByLinkedId.entries()) {
+        const lastMs = Date.parse(call.lastEventTime || call.firstEventTime || "");
+        const stateCall = callState.getCall(linkedid);
+        const terminal =
+            ["HANGUP", "ABANDONED", "COMPLETED", "BUSY", "NOANSWER", "CANCEL", "CHANUNAVAIL"].includes(
+                String(call.status || "").toUpperCase()
+            ) || (stateCall && ["ENDED", "ABANDONED", "CANCELLED", "NOANSWER", "BUSY", "FAILED"].includes(stateCall.status));
+
+        if (!stateCall || (terminal && Number.isFinite(lastMs) && lastMs < cutoffMs)) {
+            callsByLinkedId.delete(linkedid);
+            rawEventsByLinkedId.delete(linkedid);
+            actionsByLinkedId.delete(linkedid);
+        }
+    }
 }
 
 function extractExtensionNumber(value) {
@@ -220,7 +266,7 @@ function handleManagerEvent(event) {
     logCallSummary(normalized.linkedid);
     notifyRedirectStasisEarlyEnd(normalized);
     lifecycleEvents.emit("manager-event", normalized);
-    notifyLaravel(normalized);
+    notifyLaravelV2(normalized);
 }
 
 function normalizeEventName(event) {
@@ -247,6 +293,13 @@ function normalizeRawEvent(event, eventName = normalizeEventName(event)) {
             "",
         destChannel: event.destchannel || event.DestChannel || "",
         dialStatus: event.dialstatus || event.DialStatus || "",
+        queue: event.queue || event.Queue || "",
+        extension: event.extension || event.Extension || event.exten || event.Exten || "",
+        destExtension: event.destextension || event.DestExtension || "",
+        memberName: event.membername || event.MemberName || event.interface || event.Interface || "",
+        context: event.context || event.Context || "",
+        channelStateDesc: event.channelstatedesc || event.ChannelStateDesc || "",
+        bridgeNumChannels: event.bridgenumchannels || event.BridgeNumChannels || "",
         state: event.channelstatedesc || event.ChannelStateDesc || event.state || event.State || "",
         application: event.application || event.Application || "",
         appData: event.appdata || event.AppData || "",
@@ -498,6 +551,8 @@ function getStatus() {
         port: env.pbxAmiPort,
         username: env.pbxAmiUsername,
         outboundEnabled: env.trunkOutboundEnabled,
+        activeCallsCount: callState.getActiveCount(),
+        trackedCallsCount: callsByLinkedId.size,
         lastAmiEventTime,
         lastAmiError,
     };
@@ -1140,6 +1195,121 @@ function notifyLaravel(event) {
     });
 }
 
+function notifyLaravelV2(event) {
+    if (!event || !event.linkedid) {
+        return;
+    }
+
+    const metadata = resolveEventMetadata(event);
+    const isOutbound = Boolean(metadata && metadata.direction === "outbound");
+    const decision = callState.processEvent(event, { isOutbound });
+
+    if (!decision || !decision.call) {
+        return;
+    }
+
+    if (decision.isTerminal) {
+        auditLog.record({
+            category: "call",
+            type: decision.call.status,
+            linkedid: decision.call.linkedid,
+            queue: decision.call.queue,
+            caller: decision.call.callerNumber,
+            agentExtension: decision.call.answeredExtension || decision.call.targetExtension || null,
+            outcome: decision.reason,
+            summary: `Terminal ${decision.call.status} (${decision.call.primaryChannel || "no-channel"})`,
+        });
+    } else if (decision.emit) {
+        auditLog.record({
+            category: "call",
+            type: decision.emitEventName,
+            linkedid: decision.call.linkedid,
+            queue: decision.call.queue,
+            caller: decision.call.callerNumber,
+            agentExtension: decision.call.answeredExtension || decision.call.targetExtension || null,
+            outcome: decision.call.status,
+            summary: decision.reason,
+        });
+    }
+
+    if (!decision.emit || !env.laravelTrunkEventsEnabled) {
+        return;
+    }
+
+    const stateCall = decision.call;
+    const legacyCall = callsByLinkedId.get(event.linkedid);
+    const mappedStatus =
+        stateCall.status === "ENDED"
+            ? "HANGUP"
+            : stateCall.status === "ABANDONED"
+                ? "ABANDONED"
+                : stateCall.status === "ANSWERED"
+                    ? "ANSWER"
+                    : stateCall.status;
+
+    const callbackEvent = {
+        ...event,
+        event: decision.emitEventName || event.event,
+        timestamp: event.time,
+        occurred_at: event.time,
+        queue: event.queue || stateCall.queue || "",
+    };
+
+    const callbackSummary = {
+        linkedid: stateCall.linkedid,
+        firstEventTime: stateCall.firstEventAt,
+        lastEventTime: stateCall.lastEventAt,
+        queueJoinedAt: stateCall.queueJoinedAt,
+        ringStartedAt: stateCall.ringStartedAt,
+        answeredAt: stateCall.answeredAt,
+        endedAt: stateCall.endedAt,
+        from: (legacyCall && legacyCall.from) || stateCall.callerNumber || event.caller || "",
+        to: (legacyCall && legacyCall.to) || stateCall.targetExtension || stateCall.queue || event.destination || "",
+        callerName: (legacyCall && legacyCall.callerName) || stateCall.callerName || event.callerName || "",
+        queue: stateCall.queue || "",
+        status: mappedStatus,
+        answered: Boolean(stateCall.answered),
+        bridged: Boolean(stateCall.bridged),
+        hangupCause: stateCall.hangupCause || "",
+        hangupText: stateCall.hangupText || "",
+        result: mappedStatus.toLowerCase(),
+    };
+
+    const payload = {
+        ...(metadata || {}),
+        linkedid: stateCall.linkedid,
+        event_type: mappedStatus,
+        is_terminal_event: Boolean(decision.isTerminal),
+        occurred_at: event.time,
+        event: callbackEvent,
+        summary: callbackSummary,
+        source: "ariana-asterisk-pbx",
+    };
+
+    if (env.pbxLogLaravelCallbacks) {
+        console.log("[pbx:laravel:v2] enqueueing trunk event", {
+            linkedid: stateCall.linkedid,
+            event: callbackEvent.event,
+            status: mappedStatus,
+            dedupeKey: decision.dedupeKey,
+            isTerminal: decision.isTerminal,
+        });
+    }
+
+    laravelService
+        .sendTrunkCallEvent(payload, {
+            linkedid: stateCall.linkedid,
+            dedupeKey: decision.dedupeKey,
+        })
+        .catch((error) => {
+            console.error("[pbx:laravel:v2] failed to enqueue trunk event", {
+                linkedid: stateCall.linkedid,
+                event: callbackEvent.event,
+                message: error.message,
+            });
+        });
+}
+
 function resolveEventMetadata(event) {
     for (const resolver of eventMetadataResolvers) {
         try {
@@ -1332,7 +1502,18 @@ function isNonTerminalHangupEvent(event, call) {
     }
 
     const channel = String(event.channel || "");
-    if (channel.startsWith("Local/") || channel.startsWith("UnicastRTP/")) {
+    const kind = classifyChannel(channel, event.context);
+    const primary = primaryCallChannel(call);
+
+    if (kind === "internal_media" || channel.startsWith("UnicastRTP/")) {
+        return true;
+    }
+
+    if (kind === "agent_leg") {
+        return true;
+    }
+
+    if (channel.startsWith("Local/") && (!primary || channel !== primary)) {
         return true;
     }
 
@@ -1342,7 +1523,6 @@ function isNonTerminalHangupEvent(event, call) {
 
     const actions = actionsByLinkedId.get(event.linkedid) || [];
     const redirectSent = actions.some((item) => item.action === "connect_extension_redirect_sent");
-    const primary = primaryCallChannel(call);
 
     if (redirectSent && primary && channel && channel !== primary) {
         return true;
@@ -1782,64 +1962,35 @@ function isExtensionBusyLocally(extension) {
     return false;
 }
 
-async function syncQueuePresence({ online_extensions = [], all_extensions = [], queue = "650" }) {
+async function syncQueuePresence({ online_extensions = [], all_extensions = [], queue = "650", force = false }) {
     ensureReady();
 
-    const cleanOnline = (Array.isArray(online_extensions) ? online_extensions : [])
+    const cleanAllInput = (Array.isArray(all_extensions) ? all_extensions : [])
         .map((ext) => extractExtensionNumber(ext))
         .filter(Boolean);
+    const resolvedAll = cleanAllInput.length > 0 ? cleanAllInput : ["801", "802", "803", "804"];
 
-    let cleanAll = (Array.isArray(all_extensions) ? all_extensions : [])
-        .map((ext) => extractExtensionNumber(ext))
-        .filter(Boolean);
-
-    if (cleanAll.length === 0) {
-        cleanAll = ["801", "802", "803", "804"];
-    }
-
-    for (const onExt of cleanOnline) {
-        if (!cleanAll.includes(onExt)) {
-            cleanAll.push(onExt);
-        }
-    }
-
-    console.log("[pbx:queue] syncing queue presence", {
+    const summary = await queuePresence.syncDelta({
         queue,
-        online: cleanOnline,
-        all: cleanAll,
+        onlineExtensions: online_extensions,
+        allExtensions: resolvedAll,
+        force: Boolean(force),
+        isExtensionBusy: isExtensionBusyLocally,
+        runAmiAction,
+        fetchQueueStatus: (targetQueue) => getQueueStatus(targetQueue),
     });
 
-    const results = [];
-    for (const ext of cleanAll) {
-        let isOnline = cleanOnline.includes(ext);
-
-        if (isOnline && isExtensionBusyLocally(ext)) {
-            console.log("[pbx:queue] keeping extension paused during active call/media session", {
-                extension: ext,
-                queue,
-            });
-            isOnline = false;
-        }
-
-        try {
-            const res = await pauseQueueMember({
-                extension: ext,
-                paused: !isOnline,
-                reason: isOnline ? "online_eva" : "in_call_eva",
-                queue,
-            });
-            results.push({ extension: ext, isOnline, ok: true, details: res });
-        } catch (err) {
-            results.push({ extension: ext, isOnline, ok: false, error: err.message });
-        }
+    if (summary.changedCount > 0) {
+        auditLog.record({
+            category: "queue",
+            type: "presence_delta",
+            queue: summary.queue,
+            outcome: "synced",
+            summary: `Updated ${summary.changedCount} members, skipped ${summary.skippedCount} unchanged`,
+        });
     }
 
-    return {
-        queue,
-        online: cleanOnline,
-        all: cleanAll,
-        results,
-    };
+    return summary;
 }
 
 async function getQueueStatus(queue = "") {
@@ -1854,6 +2005,7 @@ async function getQueueStatus(queue = "") {
 module.exports = {
     start,
     stop,
+    restart,
     getStatus,
     getCallEvents,
     getCallsSummary,
