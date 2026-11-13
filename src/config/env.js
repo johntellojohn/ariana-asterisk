@@ -40,10 +40,16 @@ const env = {
     nodeEnv,
     port: toNumber(process.env.PORT, 3002),
     appName: process.env.APP_NAME || "Ariana Asterisk Gateway",
-    buildVersion: process.env.APP_BUILD_VERSION || "ari-ai-trunk-v1",
+    buildVersion: process.env.APP_BUILD_VERSION || "ari-ai-trunk-v2",
     publicBaseUrl: normalizePublicBaseUrl(process.env.PUBLIC_BASE_URL, nodeEnv),
     corsOrigins: toList(process.env.CORS_ORIGINS, ["*"]),
     logLevel: process.env.LOG_LEVEL || "info",
+    dataDir: process.env.DATA_DIR || path.join(process.cwd(), "data"),
+    configMasterKey: process.env.CONFIG_MASTER_KEY || "",
+    adminBootstrapUser: process.env.ADMIN_BOOTSTRAP_USER || "admin",
+    adminBootstrapPassword: process.env.ADMIN_BOOTSTRAP_PASSWORD || "",
+    adminSessionSecret: process.env.ADMIN_SESSION_SECRET || "",
+    adminSessionTtlMs: toNumber(process.env.ADMIN_SESSION_TTL_MS, 12 * 60 * 60 * 1000),
 
     asteriskApiToken:
         process.env.ASTERISK_API_TOKEN ||
@@ -70,6 +76,22 @@ const env = {
     laravelCallbackTimeoutMs: toNumber(
         process.env.LARAVEL_CALLBACK_TIMEOUT_MS,
         30000
+    ),
+    laravelHeartbeatEnabled: toBoolean(
+        process.env.LARAVEL_HEARTBEAT_ENABLED,
+        true
+    ),
+    laravelHeartbeatPath:
+        process.env.LARAVEL_HEARTBEAT_PATH || "/api/trunk-calls/heartbeat",
+    laravelHeartbeatIntervalMs: toNumber(
+        process.env.LARAVEL_HEARTBEAT_INTERVAL_MS,
+        60000
+    ),
+    auditRetentionDays: toNumber(process.env.AUDIT_RETENTION_DAYS, 15),
+    outboxMaxItems: toNumber(process.env.OUTBOX_MAX_ITEMS, 5000),
+    outboxHistoricalSyncThresholdMs: toNumber(
+        process.env.OUTBOX_HISTORICAL_SYNC_THRESHOLD_MS,
+        5 * 60 * 1000
     ),
 
     openaiApiKey: process.env.OPENAI_API_KEY || "",

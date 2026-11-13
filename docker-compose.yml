@@ -7,11 +7,12 @@ services:
     restart: unless-stopped
     ports:
       - "${HOST_PORT:-366}:${PORT:-3002}"
-      - "${ARI_EXTERNAL_MEDIA_PORT_START:-46000}-${ARI_EXTERNAL_MEDIA_PORT_END:-46100}:${ARI_EXTERNAL_MEDIA_PORT_START:-46000}-${ARI_EXTERNAL_MEDIA_PORT_END:-46100}/udp"
+      - "${ARI_EXTERNAL_MEDIA_PORT_START:-46000}-${ARI_EXTERNAL_MEDIA_PORT_END:-46200}:${ARI_EXTERNAL_MEDIA_PORT_START:-46000}-${ARI_EXTERNAL_MEDIA_PORT_END:-46200}/udp"
     env_file:
       - .env
     volumes:
       - ./logs:/app/logs
+      - ./data:/app/data
     healthcheck:
       test:
         [
