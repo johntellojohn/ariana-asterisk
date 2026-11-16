@@ -52,6 +52,7 @@ async function bootstrap() {
             const pbxStatus = pbxService.getStatus();
             const ariStatus = ariService.getStatus();
             const outboxStats = webhookDispatcher.getStats();
+            const mem = process.memoryUsage();
             return {
                 gateway_version: env.buildVersion,
                 uptime_seconds: Math.round(process.uptime()),
@@ -61,6 +62,10 @@ async function bootstrap() {
                 active_calls_count: Number(pbxStatus.activeCallsCount || 0),
                 outbox_pending_count: Number(outboxStats.pendingCount || 0),
                 outbox_online: Boolean(outboxStats.online),
+                memory_rss_mb: Math.round((mem.rss / (1024 * 1024)) * 10) / 10,
+                memory_heap_used_mb: Math.round((mem.heapUsed / (1024 * 1024)) * 10) / 10,
+                webhook_last_latency_ms: outboxStats.lastLatencyMs ?? null,
+                webhook_avg_latency_ms: outboxStats.avgLatencyMs ?? null,
             };
         },
     });

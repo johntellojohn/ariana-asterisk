@@ -63,6 +63,8 @@ async function run() {
         );
         assert.strictEqual(deliveredOrder[0].database, "sigcrm_test");
         assert.strictEqual(deliveredOrder[0].historical, false);
+        assert.strictEqual(typeof dispatcher.getStats().lastLatencyMs, "number");
+        assert.strictEqual(typeof dispatcher.getStats().avgLatencyMs, "number");
         dispatcher.stop();
 
         // 2. Offline persistence + recovery with historical_sync=true after threshold

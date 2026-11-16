@@ -55,6 +55,10 @@ class WebhookDispatcherService {
             historicalSyncedCount: 0,
             deadLetterCount: 0,
             droppedOverflowCount: 0,
+            lastLatencyMs: null,
+            avgLatencyMs: null,
+            latencySamples: 0,
+            latencyTotalMs: 0,
             lastSuccessAt: null,
             lastFailureAt: null,
             lastError: null,
@@ -268,6 +272,12 @@ class WebhookDispatcherService {
                     this.consecutiveFailures = 0;
                     this.stats.online = true;
                     this.stats.deliveredCount += 1;
+                    if (Number.isFinite(outcome.latencyMs)) {
+                        this.stats.lastLatencyMs = outcome.latencyMs;
+                        this.stats.latencySamples += 1;
+                        this.stats.latencyTotalMs += outcome.latencyMs;
+                        this.stats.avgLatencyMs = Math.round(this.stats.latencyTotalMs / this.stats.latencySamples);
+                    }
                     if (outcome.historicalSync) {
                         this.stats.historicalSyncedCount += 1;
                     }
@@ -340,7 +350,9 @@ class WebhookDispatcherService {
             };
 
             try {
+                const startedAt = Date.now();
                 const response = await this.sender(url, outboundBody, headers, timeoutMs);
+                const latencyMs = Math.max(0, Date.now() - startedAt);
                 if (this.auditLogger) {
                     this.auditLogger.record({
                         category: "webhook",
@@ -349,10 +361,10 @@ class WebhookDispatcherService {
                         queue: outboundBody.queue || null,
                         caller: outboundBody.caller_id_number || outboundBody.caller || null,
                         outcome: historicalSync ? "delivered_historical" : "delivered",
-                        summary: `${url} (${response && response.status ? response.status : 200})`,
+                        summary: `${url} (${response && response.status ? response.status : 200}, ${latencyMs}ms)`,
                     });
                 }
-                return { delivered: true, historicalSync };
+                return { delivered: true, historicalSync, latencyMs };
             } catch (error) {
                 const status = error && error.response ? error.response.status : null;
                 const message =
@@ -419,6 +431,8 @@ class WebhookDispatcherService {
             historicalSyncedCount: this.stats.historicalSyncedCount,
             deadLetterCount: this.stats.deadLetterCount,
             droppedOverflowCount: this.stats.droppedOverflowCount,
+            lastLatencyMs: this.stats.lastLatencyMs,
+            avgLatencyMs: this.stats.avgLatencyMs,
             lastSuccessAt: this.stats.lastSuccessAt,
             lastFailureAt: this.stats.lastFailureAt,
             lastError: this.stats.lastError,
