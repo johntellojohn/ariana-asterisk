@@ -17,6 +17,7 @@ let lastPongAt = null;
 let lastError = null;
 
 const sessionsByChannelId = new Map();
+const linkedIdAliases = new Map();
 const ariEvents = [];
 const sessionEvents = new EventEmitter();
 
@@ -490,6 +491,48 @@ function onSessionEvent(listener) {
     return () => sessionEvents.off("session-event", listener);
 }
 
+function resolveLinkedIdAlias(key) {
+    const normalized = String(key || "").trim();
+    if (!normalized) {
+        return null;
+    }
+
+    const entry = linkedIdAliases.get(normalized);
+    if (!entry) {
+        return null;
+    }
+
+    if (Date.now() - entry.updatedAtMs > 15 * 60 * 1000) {
+        linkedIdAliases.delete(normalized);
+        return null;
+    }
+
+    return entry.linkedid;
+}
+
+function registerLinkedIdAlias(key, canonicalLinkedId) {
+    const cleanKey = String(key || "").trim();
+    const canonical = String(canonicalLinkedId || "").trim();
+    if (!cleanKey || !canonical || cleanKey === canonical) {
+        return;
+    }
+
+    linkedIdAliases.set(cleanKey, {
+        linkedid: canonical,
+        updatedAtMs: Date.now(),
+    });
+
+    for (const session of sessionsByChannelId.values()) {
+        if (
+            session.channelId === cleanKey ||
+            session.channel?.name === cleanKey ||
+            session.linkedid === cleanKey
+        ) {
+            session.linkedid = canonical;
+        }
+    }
+}
+
 function upsertSession(channel, attributes = {}) {
     const channelId = channel.id;
 
@@ -501,10 +544,15 @@ function upsertSession(channel, attributes = {}) {
 
     const now = new Date().toISOString();
     const existing = sessionsByChannelId.get(channelId);
+    const resolvedAlias =
+        resolveLinkedIdAlias(channelId) ||
+        resolveLinkedIdAlias(channel.name) ||
+        (channel.linkedid ? resolveLinkedIdAlias(channel.linkedid) : null);
+
     const session = existing || {
         id: channelId,
         channelId,
-        linkedid: channel.linkedid || channel.id,
+        linkedid: resolvedAlias || channel.linkedid || channel.id,
         status: "created",
         inStasis: false,
         wasInStasis: false,
@@ -521,7 +569,7 @@ function upsertSession(channel, attributes = {}) {
         events: [],
     };
 
-    session.linkedid = channel.linkedid || session.linkedid || channel.id;
+    session.linkedid = resolvedAlias || channel.linkedid || session.linkedid || channel.id;
     session.channel = normalizeChannel(channel);
     session.updatedAt = now;
 
@@ -838,12 +886,21 @@ function findSessionByLinkedId(linkedid) {
     }
 
     const allSessions = Array.from(sessionsByChannelId.values());
+    const aliasedKeys = new Set();
+    for (const [aliasKey, entry] of linkedIdAliases.entries()) {
+        if (entry && entry.linkedid === target && Date.now() - entry.updatedAtMs <= 15 * 60 * 1000) {
+            aliasedKeys.add(aliasKey);
+        }
+    }
 
     const directMatches = allSessions.filter((session) => {
         if (session.channelId === target || session.linkedid === target) {
             return true;
         }
         if (session.channel?.name === target) {
+            return true;
+        }
+        if (aliasedKeys.has(session.channelId) || (session.channel?.name && aliasedKeys.has(session.channel.name))) {
             return true;
         }
         if (Array.isArray(session.stasisArgs) && session.stasisArgs.some((arg) => String(arg) === target)) {
@@ -1048,6 +1105,12 @@ function pruneStaleAriSessions(maxAgeMs = 15 * 60 * 1000) {
         }
     }
 
+    for (const [aliasKey, entry] of linkedIdAliases.entries()) {
+        if (!entry || Date.now() - entry.updatedAtMs > maxAgeMs) {
+            linkedIdAliases.delete(aliasKey);
+        }
+    }
+
     return removed;
 }
 
@@ -1060,6 +1123,8 @@ module.exports = {
     listSessions,
     getSession,
     getSessionByLinkedId,
+    registerLinkedIdAlias,
+    ingestEventForTest: (payload) => handleRawEvent(typeof payload === "string" ? payload : JSON.stringify(payload)),
     onSessionEvent,
     answerSession,
     answerCallByLinkedId,

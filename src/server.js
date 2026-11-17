@@ -58,7 +58,7 @@ async function bootstrap() {
                 uptime_seconds: Math.round(process.uptime()),
                 configured: configStore.isConfigured(),
                 ami_connected: Boolean(pbxStatus.connected),
-                ari_connected: Boolean(ariStatus.wsConnected),
+                ari_connected: Boolean(ariStatus.connected),
                 active_calls_count: Number(pbxStatus.activeCallsCount || 0),
                 outbox_pending_count: Number(outboxStats.pendingCount || 0),
                 outbox_online: Boolean(outboxStats.online),

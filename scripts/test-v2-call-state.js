@@ -73,12 +73,19 @@ async function run() {
     state2.processEvent({ linkedid: lid2, event: "QueueCallerJoin", channel: trunkChan, queue: "650", callerIdNum: "099888777", timestamp: "2026-11-13T17:00:01.000Z" });
     state2.processEvent({ linkedid: lid2, event: "AgentCalled", channel: trunkChan, destChannel: sipAgent, queue: "650", timestamp: "2026-11-13T17:00:04.000Z" });
 
-    // Stasis redirect defer flag prevents premature hangup during queue->Stasis bridge handoff
+    // Stasis redirect defer flag prevents premature hangup and QueueCallerAbandon during queue->Stasis handoff
     state2.markStasisRedirectPending(lid2, 5000);
     const deferredHangup = state2.processEvent({ linkedid: lid2, event: "Hangup", channel: trunkChan });
     assert.strictEqual(deferredHangup.emit, false);
     assert.strictEqual(deferredHangup.reason, "stasis_redirect_in_progress");
+    const deferredAbandon = state2.processEvent({ linkedid: lid2, event: "QueueCallerAbandon", channel: trunkChan, queue: "650" });
+    assert.strictEqual(deferredAbandon.emit, false);
+    assert.strictEqual(deferredAbandon.reason, "queue_abandon_ignored_after_stasis_or_answer");
+    state2.markStasisActivated(lid2);
     state2.clearStasisRedirectPending(lid2);
+    const lateAbandon = state2.processEvent({ linkedid: lid2, event: "QueueCallerAbandon", channel: trunkChan, queue: "650" });
+    assert.strictEqual(lateAbandon.emit, false);
+    assert.strictEqual(lateAbandon.reason, "queue_abandon_ignored_after_stasis_or_answer");
 
     const ans = state2.processEvent({ linkedid: lid2, event: "AgentConnect", channel: trunkChan, destChannel: sipAgent, timestamp: "2026-11-13T17:00:12.000Z" });
     assert.strictEqual(ans.emit, true);
@@ -151,6 +158,34 @@ async function run() {
     assert.strictEqual(thirdSync.skippedCount, 1);
     assert.strictEqual(amiCalls[amiCalls.length - 1].Interface, "Local/101@simulador-agente/n");
     assert.strictEqual(amiCalls[amiCalls.length - 1].Paused, "true");
+
+    // 5. ARI linkedid alias resolves Local ;2 channelId != PBX linkedid and prefers inStasis session
+    const ariService = require("../src/modules/ari/ari.service");
+    await ariService.ingestEventForTest({
+        type: "ChannelCreated",
+        channel: {
+            id: "1794940055.243",
+            name: "Local/001@simulador-cola-00000017;1",
+            state: "Up",
+            linkedid: "1794940055.243",
+        },
+    });
+    ariService.registerLinkedIdAlias("Local/001@simulador-cola-00000017;2", "1794940055.243");
+    ariService.registerLinkedIdAlias("1794940055.245", "1794940055.243");
+    await ariService.ingestEventForTest({
+        type: "StasisStart",
+        channel: {
+            id: "1794940055.245",
+            name: "Local/001@simulador-cola-00000017;2",
+            state: "Up",
+        },
+        args: [],
+    });
+    const resolved = ariService.getSessionByLinkedId("1794940055.243");
+    assert(resolved, "Expected ARI session via linkedid alias");
+    assert.strictEqual(resolved.channelId, "1794940055.245");
+    assert.strictEqual(resolved.linkedid, "1794940055.243");
+    assert.strictEqual(resolved.inStasis, true);
 
     console.log("v2 call-state & queue-presence tests passed");
 }

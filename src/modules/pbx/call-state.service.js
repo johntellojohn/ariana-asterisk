@@ -127,6 +127,14 @@ class CallStateService {
         this.redirectPendingByLinkedId.delete(String(linkedid));
     }
 
+    markStasisActivated(linkedid) {
+        if (!linkedid) return;
+        const call = this.calls.get(String(linkedid));
+        if (call) {
+            call.stasisActivated = true;
+        }
+    }
+
     hasStasisRedirectPending(linkedid, nowMs = Date.now()) {
         if (!linkedid) return false;
         const expiry = this.redirectPendingByLinkedId.get(String(linkedid));
@@ -181,6 +189,7 @@ class CallStateService {
                 lastEventAt: nowIso,
                 answered: false,
                 bridged: false,
+                stasisActivated: false,
                 terminalEmitted: false,
                 incomingEmitted: false,
                 answeredEmitted: false,
@@ -321,8 +330,11 @@ class CallStateService {
             };
         }
 
-        // Handle explicit queue caller abandonment -> immediate terminal ABANDONED
+        // Handle explicit queue caller abandonment -> suppress if redirected to Stasis or already answered
         if (eventName === "queuecallerabandon") {
+            if (this.hasStasisRedirectPending(linkedid) || call.stasisActivated || call.answered || call.bridged) {
+                return this.buildNoop(call, "queue_abandon_ignored_after_stasis_or_answer");
+            }
             call.terminalReason = "queue_caller_abandon";
             call.endedAt = call.endedAt || nowIso;
             this.transitionForward(call, "ABANDONED");
@@ -456,7 +468,7 @@ class CallStateService {
             call.hangupText = event.causeTxt || call.hangupText;
             call.endedAt = call.endedAt || nowIso;
 
-            const finalStatus = call.answered || call.bridged ? "ENDED" : "ABANDONED";
+            const finalStatus = call.answered || call.bridged || call.stasisActivated ? "ENDED" : "ABANDONED";
             call.terminalReason = finalStatus === "ENDED" ? "primary_hangup_after_answer" : "primary_hangup_before_answer";
             this.transitionForward(call, finalStatus);
             return this.buildTerminalEmission(call, finalStatus === "ABANDONED" ? "queuecallerabandon" : "hangup");

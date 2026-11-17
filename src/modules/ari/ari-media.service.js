@@ -176,6 +176,10 @@ async function startMediaSessionByLinkedId(linkedid, options = {}) {
         Boolean(outboundKey) ||
         (typeof outboundCallService?.isOutboundLinkedId === "function" && outboundCallService.isOutboundLinkedId(targetLinkedid));
 
+    if (!isOutbound) {
+        registerPbxAliasesForCall(targetLinkedid);
+    }
+
     let baseSession = ariService.getSessionByLinkedId(targetLinkedid);
     if (!baseSession && outboundKey) {
         baseSession = ariService.getSessionByLinkedId(outboundKey);
@@ -187,8 +191,8 @@ async function startMediaSessionByLinkedId(linkedid, options = {}) {
             hasSession: Boolean(baseSession),
             inStasis: Boolean(baseSession?.inStasis),
         });
-        await redirectTrackedCallToStasis(targetLinkedid);
-        baseSession = await waitForAriSession(targetLinkedid, env.ariStasisWaitMs, outboundKey);
+        const redirectedChannel = await redirectTrackedCallToStasis(targetLinkedid);
+        baseSession = await waitForAriSession(targetLinkedid, env.ariStasisWaitMs, [outboundKey, redirectedChannel]);
     } else if (isOutbound && (!baseSession || !baseSession.inStasis)) {
         console.log("[ari:media] waiting for outbound call to enter Stasis without redirect", {
             targetLinkedid,
@@ -300,30 +304,118 @@ async function startMediaSessionByLinkedId(linkedid, options = {}) {
     }
 }
 
+function isLikelyCallerChannelName(channelName) {
+    const text = String(channelName || "").trim();
+    if (!text) {
+        return false;
+    }
+
+    const lower = text.toLowerCase();
+    if (lower.includes("@from-internal") || lower.includes("@simulador-agente") || lower.startsWith("unicastrtp/")) {
+        return false;
+    }
+
+    if (lower.includes("@simulador-cola") || lower.includes("@from-pstn") || lower.includes("@from-trunk")) {
+        return true;
+    }
+
+    // Ignore short extension legs like PJSIP/101-0001 or SIP/150-0002; allow trunks / non-extension channels
+    return !/^(?:Local|SIP|PJSIP|IAX2)\/\d{2,5}[@\-]/i.test(text);
+}
+
+function registerPbxAliasesForCall(targetLinkedid, extraChannel = null) {
+    if (typeof ariService.registerLinkedIdAlias !== "function") {
+        return [];
+    }
+
+    const keys = new Set();
+    if (extraChannel) {
+        keys.add(String(extraChannel).trim());
+    }
+
+    const pbxCall = typeof pbxService.getCallByLinkedId === "function"
+        ? pbxService.getCallByLinkedId(targetLinkedid)
+        : null;
+
+    if (pbxCall) {
+        for (const ch of pbxCall.channels || []) {
+            if (isLikelyCallerChannelName(ch)) {
+                keys.add(String(ch).trim());
+            }
+        }
+        for (const ev of pbxCall.events || []) {
+            const evChannel = String(ev?.channel || "").trim();
+            if (!evChannel) {
+                continue;
+            }
+            const isExplicitChannelMatch =
+                ev.event === "queuecallerjoin" ||
+                isLikelyCallerChannelName(evChannel) ||
+                (extraChannel && evChannel === String(extraChannel).trim());
+            if (isExplicitChannelMatch) {
+                keys.add(evChannel);
+                if (ev.uniqueid) {
+                    keys.add(String(ev.uniqueid).trim());
+                }
+            }
+        }
+    }
+
+    for (const key of keys) {
+        if (key && key !== targetLinkedid) {
+            ariService.registerLinkedIdAlias(key, targetLinkedid);
+        }
+    }
+
+    return Array.from(keys).filter(Boolean);
+}
+
 async function redirectTrackedCallToStasis(linkedid) {
-    callState.markStasisRedirectPending(linkedid, Math.max(5000, Number(env.ariStasisWaitMs || 5000) + 2000));
+    registerPbxAliasesForCall(linkedid);
+    callState.markStasisRedirectPending(linkedid, Math.max(7000, Number(env.ariStasisWaitMs || 5000) + 2500));
     try {
-        await pbxService.redirectCallToStasis(linkedid);
+        const result = await pbxService.redirectCallToStasis(linkedid);
+        const redirectedChannel = result?.channel ? String(result.channel).trim() : null;
+        if (redirectedChannel) {
+            registerPbxAliasesForCall(linkedid, redirectedChannel);
+        }
+        return redirectedChannel;
     } catch (error) {
         callState.clearStasisRedirectPending(linkedid);
         console.warn("[ari:media] redirect to Stasis failed", {
             linkedid,
             message: error.message,
         });
+        return null;
     }
 }
 
-async function waitForAriSession(linkedid, timeoutMs, fallbackKey = null) {
+async function waitForAriSession(linkedid, timeoutMs, fallbackKeys = null) {
     const startedAt = Date.now();
     const maxWait = Math.max(0, Number(timeoutMs || 0));
+    const keys = [
+        linkedid,
+        ...(Array.isArray(fallbackKeys) ? fallbackKeys : [fallbackKeys]),
+    ]
+        .map((k) => String(k || "").trim())
+        .filter(Boolean);
+
+    const findMatchingSession = () => {
+        for (const key of keys) {
+            const candidate = ariService.getSessionByLinkedId(key);
+            if (candidate && candidate.inStasis) {
+                return candidate;
+            }
+        }
+        return null;
+    };
 
     while (Date.now() - startedAt <= maxWait) {
-        let session = ariService.getSessionByLinkedId(linkedid);
-        if (!session && fallbackKey) {
-            session = ariService.getSessionByLinkedId(fallbackKey);
-        }
-
+        const session = findMatchingSession();
         if (session && session.inStasis) {
+            if (typeof callState.markStasisActivated === "function") {
+                callState.markStasisActivated(linkedid);
+            }
             callState.clearStasisRedirectPending(linkedid);
             return session;
         }
@@ -338,11 +430,7 @@ async function waitForAriSession(linkedid, timeoutMs, fallbackKey = null) {
     }
 
     callState.clearStasisRedirectPending(linkedid);
-    let fallback = ariService.getSessionByLinkedId(linkedid);
-    if (!fallback && fallbackKey) {
-        fallback = ariService.getSessionByLinkedId(fallbackKey);
-    }
-    return fallback && fallback.inStasis ? fallback : null;
+    return findMatchingSession();
 }
 
 function delay(ms) {
