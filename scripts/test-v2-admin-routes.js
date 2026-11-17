@@ -55,7 +55,11 @@ async function run() {
     await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
 
     try {
-        // 1. Unauthenticated /admin redirects to /admin/login; /admin/api/overview returns 401
+        // 1. Unauthenticated / and /admin redirect to /admin/login; /admin/api/overview returns 401
+        const unauthRoot = await request(server, "GET", "/");
+        assert.strictEqual(unauthRoot.status, 302);
+        assert.strictEqual(unauthRoot.headers.get("location"), "/admin/login");
+
         const unauthPage = await request(server, "GET", "/admin");
         assert.strictEqual(unauthPage.status, 302);
         assert.strictEqual(unauthPage.headers.get("location"), "/admin/login");
@@ -89,7 +93,13 @@ async function run() {
         assert.ok(setCookie.includes("HttpOnly"));
         const cookieHeader = setCookie.split(";")[0];
 
-        // 5. Authenticated /admin page renders with zero inline JS
+        // 5. Authenticated / redirects to /admin, and /admin renders with zero inline JS
+        const authRoot = await request(server, "GET", "/", {
+            headers: { Cookie: cookieHeader },
+        });
+        assert.strictEqual(authRoot.status, 302);
+        assert.strictEqual(authRoot.headers.get("location"), "/admin");
+
         const adminHtml = await request(server, "GET", "/admin", {
             headers: { Cookie: cookieHeader },
         });

@@ -7,6 +7,7 @@ const morgan = require("morgan");
 const env = require("./config/env");
 const routes = require("./routes/index.routes");
 const audioRoutes = require("./modules/audio/audio.routes");
+const adminAuth = require("./modules/admin/admin-auth.service");
 const adminRoutes = require("./modules/admin/admin.routes");
 const errorMiddleware = require("./middlewares/error.middleware");
 
@@ -23,6 +24,11 @@ app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 app.use(morgan("dev", {
     skip: (req) => req.path === "/api/health",
 }));
+
+app.get("/", (req, res) => {
+    const target = adminAuth.extractSessionFromRequest(req) ? "/admin" : "/admin/login";
+    return res.redirect(target);
+});
 
 app.use("/admin", adminRoutes);
 app.use("/api/audio", audioRoutes);
