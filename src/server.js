@@ -28,6 +28,7 @@ async function bootstrap() {
     await webhookDispatcher.init({
         dataDir: env.dataDir,
         maxItems: env.outboxMaxItems,
+        maxConcurrency: env.outboxMaxConcurrency,
         historicalSyncThresholdMs: env.outboxHistoricalSyncThresholdMs,
         auditLogger: auditLog,
         getTargetConfig: () => ({

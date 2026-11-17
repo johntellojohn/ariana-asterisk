@@ -10,7 +10,9 @@
 Solicitar confirmación escrita del área de TI / Telefonía del Hospital antes de agendar ventana:
 
 1. **Central Issabel / Asterisk:**
-   * Versión instalada (`asterisk -V`): se requiere **Asterisk 13+** con soporte ARI (`res_ari.so` y `res_http_websocket.so`) y AMI (`5038/TCP`).
+   * Versión instalada (`asterisk -V`):
+     * **Asterisk 13+** con soporte ARI (`res_ari.so`, `res_http_websocket.so`) y AMI (`5038/TCP`) para señalización de colas, estados en EVA y atención por **extensión SIP / Zoiper / teléfono IP** (`TRUNK_ANSWER_MODE=extension`).
+     * **Asterisk 16.6+ / 18+ / 20+** (ej. Issabel 5 o Asterisk actualizado con `chan_rtp.so` + `/ari/channels/externalMedia`) **obligatorio** si los asesores contestarán con **audio WebRTC directo en navegador** (`TRUNK_ANSWER_MODE=ari_media`) o agente de voz IA por ARI. *(Verificado en lab el 17/11/2026: Asterisk `13.22.0` devuelve `400 Endpoint must be specified` al intentar `/ari/channels/externalMedia`).*
 2. **Servidor / Mini-PC en la LAN del Hospital (para `ariana-asterisk v2`):**
    * Red **Ethernet cableada** en la misma subred LAN (o ruta directa sin NAT estricto) que el Issabel.
    * **UPS** y plan de energía sin suspensión automática (`systemctl mask sleep.target suspend.target`).

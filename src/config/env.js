@@ -89,6 +89,10 @@ const env = {
     ),
     auditRetentionDays: toNumber(process.env.AUDIT_RETENTION_DAYS, 15),
     outboxMaxItems: toNumber(process.env.OUTBOX_MAX_ITEMS, 5000),
+    outboxMaxConcurrency: Math.max(
+        1,
+        Math.min(16, toNumber(process.env.WEBHOOK_MAX_CONCURRENCY || process.env.OUTBOX_MAX_CONCURRENCY, 6))
+    ),
     outboxHistoricalSyncThresholdMs: toNumber(
         process.env.OUTBOX_HISTORICAL_SYNC_THRESHOLD_MS,
         5 * 60 * 1000

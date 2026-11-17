@@ -147,6 +147,66 @@ async function run() {
 
         restartedDispatcher.stop();
         audit.stop();
+
+        // 3. Per-linkedid strict FIFO with cross-call parallel lanes
+        const parallelDir = path.join(tempDir, "parallel");
+        const parallelDispatcher = new WebhookDispatcherService();
+        let activeRequests = 0;
+        let peakConcurrent = 0;
+        const call1Timeline = [];
+
+        await parallelDispatcher.init({
+            dataDir: parallelDir,
+            maxConcurrency: 4,
+            getTargetConfig: () => ({
+                enabled: true,
+                baseUrl: "http://eva.local",
+                token: "tok-123",
+                tenantDatabase: "sigcrm_test",
+                timeoutMs: 2000,
+            }),
+            sender: async (_url, body) => {
+                activeRequests += 1;
+                peakConcurrent = Math.max(peakConcurrent, activeRequests);
+                if (body.linkedid === "call-p1") {
+                    call1Timeline.push(`start:${body.event_type}`);
+                }
+                await new Promise((resolve) => setTimeout(resolve, 60));
+                if (body.linkedid === "call-p1") {
+                    call1Timeline.push(`end:${body.event_type}`);
+                }
+                activeRequests -= 1;
+                return { status: 200 };
+            },
+        });
+
+        for (const id of ["call-p1", "call-p2", "call-p3", "call-p4"]) {
+            parallelDispatcher.enqueue({
+                linkedid: id,
+                dedupeKey: `INCOMING:${id}`,
+                payload: { linkedid: id, event_type: "INCOMING" },
+            });
+        }
+        parallelDispatcher.enqueue({
+            linkedid: "call-p1",
+            dedupeKey: "TERMINAL:call-p1",
+            payload: { linkedid: "call-p1", event_type: "TERMINAL", is_terminal_event: true },
+        });
+
+        const startedParallel = Date.now();
+        await parallelDispatcher.flush();
+        const parallelElapsed = Date.now() - startedParallel;
+        parallelDispatcher.stop();
+
+        assert.strictEqual(peakConcurrent, 4, `Expected 4 parallel call lanes, got ${peakConcurrent}`);
+        assert.deepStrictEqual(call1Timeline, [
+            "start:INCOMING",
+            "end:INCOMING",
+            "start:TERMINAL",
+            "end:TERMINAL",
+        ]);
+        assert.ok(parallelElapsed < 240, `Expected <240ms parallel burst, got ${parallelElapsed}ms`);
+
         console.log("v2 webhook-dispatcher & audit-log tests passed");
     } finally {
         await fs.rm(tempDir, { recursive: true, force: true });

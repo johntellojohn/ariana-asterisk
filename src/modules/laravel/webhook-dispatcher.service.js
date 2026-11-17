@@ -32,6 +32,7 @@ class WebhookDispatcherService {
         this.dataDir = null;
         this.outboxPath = null;
         this.maxItems = 5000;
+        this.maxConcurrency = 6;
         this.historicalSyncThresholdMs = 5 * 60 * 1000;
         this.getTargetConfig = null;
         this.sender = null;
@@ -42,6 +43,8 @@ class WebhookDispatcherService {
         this.deadLetters = [];
         this.inFlightKeys = new Set();
         this.processing = false;
+        this.drainPromise = null;
+        this.wakeDrain = null;
         this.retryTimer = null;
         this.persistQueue = Promise.resolve();
         this.persistDirty = false;
@@ -69,6 +72,10 @@ class WebhookDispatcherService {
         this.dataDir = path.resolve(options.dataDir || path.join(process.cwd(), "data"));
         this.outboxPath = path.join(this.dataDir, OUTBOX_FILE_NAME);
         this.maxItems = Number(options.maxItems) > 50 ? Number(options.maxItems) : 5000;
+        const parsedConcurrency = Number(options.maxConcurrency);
+        this.maxConcurrency = Number.isFinite(parsedConcurrency) && parsedConcurrency >= 1
+            ? Math.min(16, Math.floor(parsedConcurrency))
+            : 6;
         this.historicalSyncThresholdMs =
             Number(options.historicalSyncThresholdMs) >= 1000
                 ? Number(options.historicalSyncThresholdMs)
@@ -93,6 +100,9 @@ class WebhookDispatcherService {
 
     stop() {
         this.stopped = true;
+        if (this.wakeDrain) {
+            this.wakeDrain();
+        }
         if (this.retryTimer) {
             clearTimeout(this.retryTimer);
             this.retryTimer = null;
@@ -187,7 +197,11 @@ class WebhookDispatcherService {
         this.persistDirty = true;
 
         if (!this.stopped) {
-            this.scheduleDrain(0);
+            if (this.wakeDrain) {
+                this.wakeDrain();
+            } else {
+                this.scheduleDrain(0);
+            }
         }
 
         return { queued: true, deduped: false, id: item.id };
@@ -240,15 +254,69 @@ class WebhookDispatcherService {
         return -1;
     }
 
+    applyItemOutcome(item, outcome) {
+        if (outcome.delivered) {
+            const removeIdx = this.items.findIndex((entry) => entry.id === item.id);
+            if (removeIdx >= 0) {
+                this.items.splice(removeIdx, 1);
+            }
+            this.consecutiveFailures = 0;
+            this.stats.online = true;
+            this.stats.deliveredCount += 1;
+            if (Number.isFinite(outcome.latencyMs)) {
+                this.stats.lastLatencyMs = outcome.latencyMs;
+                this.stats.latencySamples += 1;
+                this.stats.latencyTotalMs += outcome.latencyMs;
+                this.stats.avgLatencyMs = Math.round(this.stats.latencyTotalMs / this.stats.latencySamples);
+            }
+            if (outcome.historicalSync) {
+                this.stats.historicalSyncedCount += 1;
+            }
+            this.stats.lastSuccessAt = new Date().toISOString();
+            this.stats.lastError = null;
+            this.persistDirty = true;
+            return { temporaryFailure: false };
+        }
+
+        if (outcome.permanentFailure) {
+            const removeIdx = this.items.findIndex((entry) => entry.id === item.id);
+            if (removeIdx >= 0) {
+                this.items.splice(removeIdx, 1);
+            }
+            this.pushDeadLetter(item, outcome.error);
+            this.persistDirty = true;
+            return { temporaryFailure: false };
+        }
+
+        return { temporaryFailure: true, error: outcome.error };
+    }
+
     async drain() {
-        if (this.processing || this.stopped) {
+        if (this.stopped) {
             return;
+        }
+        if (this.processing) {
+            return this.drainPromise || undefined;
         }
 
         this.processing = true;
+        this.drainPromise = this.runDrainLoop().finally(() => {
+            this.processing = false;
+            this.drainPromise = null;
+            this.wakeDrain = null;
+        });
 
-        try {
-            while (!this.stopped && this.items.length > 0) {
+        return this.drainPromise;
+    }
+
+    async runDrainLoop() {
+        let offlineHalted = false;
+        let lastTemporaryError = null;
+        const active = new Map();
+
+        const launchAvailable = () => {
+            const limit = this.stats.online ? this.maxConcurrency : 1;
+            while (!this.stopped && !offlineHalted && active.size < limit) {
                 const idx = this.pickNextDispatchableIndex();
                 if (idx < 0) {
                     break;
@@ -256,65 +324,85 @@ class WebhookDispatcherService {
 
                 const item = this.items[idx];
                 this.inFlightKeys.add(item.queueKey);
+                const task = this.deliverWithShortRetries(item)
+                    .catch((error) => ({
+                        delivered: false,
+                        permanentFailure: false,
+                        error: (error && error.message) || "Webhook delivery failed",
+                    }))
+                    .then((outcome) => ({ item, outcome, isWorker: true }));
+                active.set(item.id, task);
+            }
+        };
 
-                let outcome;
-                try {
-                    outcome = await this.deliverWithShortRetries(item);
-                } finally {
-                    this.inFlightKeys.delete(item.queueKey);
-                }
-
-                if (outcome.delivered) {
-                    const removeIdx = this.items.findIndex((entry) => entry.id === item.id);
-                    if (removeIdx >= 0) {
-                        this.items.splice(removeIdx, 1);
-                    }
-                    this.consecutiveFailures = 0;
-                    this.stats.online = true;
-                    this.stats.deliveredCount += 1;
-                    if (Number.isFinite(outcome.latencyMs)) {
-                        this.stats.lastLatencyMs = outcome.latencyMs;
-                        this.stats.latencySamples += 1;
-                        this.stats.latencyTotalMs += outcome.latencyMs;
-                        this.stats.avgLatencyMs = Math.round(this.stats.latencyTotalMs / this.stats.latencySamples);
-                    }
-                    if (outcome.historicalSync) {
-                        this.stats.historicalSyncedCount += 1;
-                    }
-                    this.stats.lastSuccessAt = new Date().toISOString();
-                    this.stats.lastError = null;
-                    this.persistDirty = true;
-                    continue;
-                }
-
-                if (outcome.permanentFailure) {
-                    const removeIdx = this.items.findIndex((entry) => entry.id === item.id);
-                    if (removeIdx >= 0) {
-                        this.items.splice(removeIdx, 1);
-                    }
-                    this.pushDeadLetter(item, outcome.error);
-                    this.persistDirty = true;
-                    continue;
-                }
-
-                // Temporary WAN / server outage: keep FIFO head intact, persist to disk, schedule backoff.
-                this.consecutiveFailures += 1;
-                this.stats.online = false;
-                this.stats.lastFailureAt = new Date().toISOString();
-                this.stats.lastError = outcome.error;
-                this.persistDirty = true;
-                await this.persistToDisk();
-                this.persistDirty = false;
-                this.scheduleDrain(this.computeOfflineBackoffMs());
+        while (!this.stopped && !offlineHalted) {
+            launchAvailable();
+            if (active.size === 0) {
                 break;
             }
 
-            if (this.persistDirty) {
-                await this.persistToDisk();
-                this.persistDirty = false;
+            const limit = this.stats.online ? this.maxConcurrency : 1;
+            let wakePromise = null;
+            if (active.size < limit) {
+                wakePromise = new Promise((resolve) => {
+                    this.wakeDrain = () => {
+                        this.wakeDrain = null;
+                        resolve({ woken: true, isWorker: false });
+                    };
+                });
+            } else {
+                this.wakeDrain = null;
             }
-        } finally {
-            this.processing = false;
+
+            const competitors = wakePromise ? [...active.values(), wakePromise] : [...active.values()];
+            const result = await Promise.race(competitors);
+            this.wakeDrain = null;
+
+            if (!result || !result.isWorker) {
+                continue;
+            }
+
+            const { item, outcome } = result;
+            active.delete(item.id);
+            this.inFlightKeys.delete(item.queueKey);
+
+            const applied = this.applyItemOutcome(item, outcome);
+            if (applied.temporaryFailure) {
+                offlineHalted = true;
+                lastTemporaryError = applied.error;
+            }
+        }
+
+        this.wakeDrain = null;
+
+        if (active.size > 0) {
+            const remaining = await Promise.all(active.values());
+            for (const { item, outcome } of remaining) {
+                active.delete(item.id);
+                this.inFlightKeys.delete(item.queueKey);
+                const applied = this.applyItemOutcome(item, outcome);
+                if (applied.temporaryFailure) {
+                    offlineHalted = true;
+                    lastTemporaryError = applied.error;
+                }
+            }
+        }
+
+        if (offlineHalted && !this.stopped) {
+            this.consecutiveFailures += 1;
+            this.stats.online = false;
+            this.stats.lastFailureAt = new Date().toISOString();
+            this.stats.lastError = lastTemporaryError;
+            this.persistDirty = true;
+            await this.persistToDisk();
+            this.persistDirty = false;
+            this.scheduleDrain(this.computeOfflineBackoffMs());
+            return;
+        }
+
+        if (this.persistDirty) {
+            await this.persistToDisk();
+            this.persistDirty = false;
         }
     }
 
