@@ -961,6 +961,15 @@ function bindUdpPort(session) {
 }
 
 async function createExternalMediaChannel(session) {
+    const ariStatus = typeof ariService.getStatus === "function" ? ariService.getStatus() : {};
+    if (ariStatus.supportsExternalMedia === false) {
+        const error = new Error(
+            `Asterisk ${ariStatus.asteriskVersion || "< 16.6"} no soporta ARI /channels/externalMedia (requiere >= 16.6). Configura pbxAnswerMode=extension o sip_bridge.`
+        );
+        error.status = 422;
+        throw error;
+    }
+
     const response = await ariService.ariRequest("post", "/channels/externalMedia", {
         params: {
             app: env.ariAppName,

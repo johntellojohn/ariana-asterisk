@@ -164,6 +164,7 @@ const env = {
     pbxDefaultCallerIdNumber: process.env.PBX_DEFAULT_CALLER_ID_NUMBER || "",
     pbxDirectTrunkEndpoint: process.env.PBX_DIRECT_TRUNK_ENDPOINT || "",
     pbxHangupCause: toNumber(process.env.PBX_HANGUP_CAUSE, 16),
+    pbxAnswerMode: String(process.env.PBX_ANSWER_MODE || process.env.TRUNK_ANSWER_MODE || "auto").trim().toLowerCase() || "auto",
     trunkOutboundEnabled: toBoolean(process.env.TRUNK_OUTBOUND_ENABLED, false),
     trunkOutboundRetentionMs: toNumber(
         process.env.TRUNK_OUTBOUND_RETENTION_MS,

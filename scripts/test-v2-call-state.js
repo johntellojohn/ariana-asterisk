@@ -187,6 +187,21 @@ async function run() {
     assert.strictEqual(resolved.linkedid, "1794940055.243");
     assert.strictEqual(resolved.inStasis, true);
 
+    // 6. Normalized PBX events use caller / callerName (without callerIdNum / callerIdName)
+    const stateNorm = new CallStateService();
+    const normRes = stateNorm.processEvent({
+        linkedid: "1795009999.1",
+        event: "QueueCallerJoin",
+        channel: "SIP/telco-0000099",
+        caller: "099888777",
+        callerName: "Paciente Norte",
+        queue: "650",
+        timestamp: "2026-11-18T11:00:00.000Z",
+    });
+    assert.strictEqual(normRes.call.callerNumber, "099888777");
+    assert.strictEqual(normRes.call.callerName, "Paciente Norte");
+    assert.strictEqual(normRes.call.queue, "650");
+
     console.log("v2 call-state & queue-presence tests passed");
 }
 

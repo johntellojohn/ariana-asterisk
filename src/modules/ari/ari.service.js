@@ -4,6 +4,7 @@ const WebSocket = require("ws");
 
 const env = require("../../config/env");
 const laravelService = require("../laravel/laravel.service");
+const { parseAsteriskVersion, supportsExternalMediaVersion } = require("../pbx/asterisk-capabilities");
 
 let ws = null;
 let started = false;
@@ -15,6 +16,15 @@ let lastConnectAttemptAt = null;
 let lastEventTime = null;
 let lastPongAt = null;
 let lastError = null;
+let asteriskInfo = {
+    rawVersion: null,
+    version: null,
+    major: null,
+    minor: null,
+    supportsExternalMedia: null,
+    detectedAt: null,
+    system: null,
+};
 
 const sessionsByChannelId = new Map();
 const linkedIdAliases = new Map();
@@ -49,6 +59,15 @@ function start() {
 function stop() {
     started = false;
     connected = false;
+    asteriskInfo = {
+        rawVersion: null,
+        version: null,
+        major: null,
+        minor: null,
+        supportsExternalMedia: null,
+        detectedAt: null,
+        system: null,
+    };
     stopWatchdogAndGc();
 
     if (reconnectTimer) {
@@ -93,6 +112,7 @@ function connectWebSocket() {
         connected = true;
         lastError = null;
         console.log(`[ari] connected to ${safeBaseUrl()} app=${env.ariAppName}`);
+        probeAsteriskInfo().catch(() => {});
     });
 
     ws.on("message", (message) => {
@@ -423,6 +443,53 @@ async function hangupCallByLinkedId(linkedid, reason = "normal") {
     return hangupSession(session.channelId, reason);
 }
 
+async function probeAsteriskInfo() {
+    if (!env.ariEnabled || !env.ariUsername || !env.ariPassword) {
+        return null;
+    }
+
+    try {
+        const response = await axios.request({
+            method: "GET",
+            url: `${restBaseUrl()}/asterisk/info`,
+            auth: {
+                username: env.ariUsername,
+                password: env.ariPassword,
+            },
+            timeout: Math.min(Number(env.ariRequestTimeoutMs) || 15000, 5000),
+            headers: {
+                Accept: "application/json",
+            },
+        });
+
+        const rawVersion = response?.data?.system?.version || null;
+        const parsed = parseAsteriskVersion(rawVersion);
+        asteriskInfo = {
+            rawVersion: parsed.raw,
+            version: parsed.parsedVersion,
+            major: parsed.major,
+            minor: parsed.minor,
+            supportsExternalMedia: supportsExternalMediaVersion(parsed),
+            detectedAt: parsed.detected ? new Date().toISOString() : null,
+            system: response?.data?.system || null,
+        };
+
+        if (parsed.detected) {
+            console.log("[ari] Asterisk info detected", {
+                version: parsed.parsedVersion,
+                supportsExternalMedia: asteriskInfo.supportsExternalMedia,
+            });
+        }
+
+        return asteriskInfo;
+    } catch (error) {
+        console.warn("[ari] Asterisk info probe failed", {
+            message: error.message,
+        });
+        return null;
+    }
+}
+
 async function ariRequest(method, path, options = {}) {
     ensureReady();
 
@@ -456,6 +523,10 @@ function getStatus() {
         lastEventTime,
         lastPongAt: lastPongAt ? new Date(lastPongAt).toISOString() : null,
         lastError,
+        asteriskVersion: asteriskInfo.version,
+        asteriskRawVersion: asteriskInfo.rawVersion,
+        asteriskDetectedAt: asteriskInfo.detectedAt,
+        supportsExternalMedia: asteriskInfo.supportsExternalMedia,
         activeSessions: Array.from(sessionsByChannelId.values())
             .filter((session) => session.status !== "ended")
             .length,
@@ -1137,4 +1208,5 @@ module.exports = {
     hangupSession,
     hangupCallByLinkedId,
     ariRequest,
+    probeAsteriskInfo,
 };

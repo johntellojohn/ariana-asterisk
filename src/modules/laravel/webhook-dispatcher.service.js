@@ -25,6 +25,35 @@ async function atomicWriteJson(filePath, payload) {
  * persistent offline outbox (DATA_DIR/outbox.json), and `historical_sync` tagging
  * for events delayed beyond the live-window threshold during WAN outages.
  */
+function extractWebhookAuditContext(outboundBody = {}) {
+    const ev = outboundBody && typeof outboundBody.event === "object" && outboundBody.event ? outboundBody.event : {};
+    const summary =
+        outboundBody && typeof outboundBody.summary === "object" && outboundBody.summary ? outboundBody.summary : {};
+
+    const queue = String(outboundBody.queue || summary.queue || ev.queue || "").trim() || null;
+    const caller =
+        String(
+            outboundBody.caller_id_number ||
+                outboundBody.caller ||
+                summary.from ||
+                ev.caller ||
+                ev.callerIdNum ||
+                ""
+        ).trim() || null;
+    const summaryTo = String(summary.to || "").trim();
+    const agentExtension =
+        String(
+            outboundBody.agent_extension ||
+                outboundBody.agentExtension ||
+                ev.agentExtension ||
+                ev.destExtension ||
+                (summaryTo && summaryTo !== String(queue || "") ? summaryTo : "") ||
+                ""
+        ).trim() || null;
+
+    return { queue, caller, agentExtension };
+}
+
 class WebhookDispatcherService {
     constructor() {
         this.initialized = false;
@@ -442,12 +471,14 @@ class WebhookDispatcherService {
                 const response = await this.sender(url, outboundBody, headers, timeoutMs);
                 const latencyMs = Math.max(0, Date.now() - startedAt);
                 if (this.auditLogger) {
+                    const meta = extractWebhookAuditContext(outboundBody);
                     this.auditLogger.record({
                         category: "webhook",
                         type: outboundBody.event_type || outboundBody.event || "trunk_event",
                         linkedid: outboundBody.linkedid || item.queueKey,
-                        queue: outboundBody.queue || null,
-                        caller: outboundBody.caller_id_number || outboundBody.caller || null,
+                        queue: meta.queue,
+                        caller: meta.caller,
+                        agentExtension: meta.agentExtension,
                         outcome: historicalSync ? "delivered_historical" : "delivered",
                         summary: `${url} (${response && response.status ? response.status : 200}, ${latencyMs}ms)`,
                     });
@@ -462,10 +493,14 @@ class WebhookDispatcherService {
 
                 if (!isRetryableHttpStatus(status)) {
                     if (this.auditLogger) {
+                        const meta = extractWebhookAuditContext(outboundBody);
                         this.auditLogger.record({
                             category: "webhook",
                             type: "dead_letter",
-                            linkedid: item.queueKey,
+                            linkedid: outboundBody.linkedid || item.queueKey,
+                            queue: meta.queue,
+                            caller: meta.caller,
+                            agentExtension: meta.agentExtension,
                             outcome: `http_${status}`,
                             summary: message,
                         });

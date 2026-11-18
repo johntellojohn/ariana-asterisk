@@ -207,6 +207,52 @@ async function run() {
         ]);
         assert.ok(parallelElapsed < 240, `Expected <240ms parallel burst, got ${parallelElapsed}ms`);
 
+        // 4. Caja Negra audit log captures nested queue, caller and agentExtension from pbx webhook payload
+        const nestedAudit = new AuditLogService();
+        const nestedDir = path.join(tempDir, "nested-audit");
+        await nestedAudit.init({ dataDir: nestedDir, retentionDays: 7 });
+        const nestedDispatcher = new WebhookDispatcherService();
+        await nestedDispatcher.init({
+            dataDir: nestedDir,
+            auditLogger: nestedAudit,
+            getTargetConfig: () => ({
+                enabled: true,
+                baseUrl: "http://eva.local",
+                token: "tok-123",
+                tenantDatabase: "sigcrm_test",
+                timeoutMs: 2000,
+            }),
+            sender: async () => ({ status: 200, data: { ok: true } }),
+        });
+
+        nestedDispatcher.enqueue({
+            linkedid: "1795010000.7",
+            dedupeKey: "ANSWERED:1795010000.7",
+            payload: {
+                linkedid: "1795010000.7",
+                event_type: "ANSWER",
+                event: {
+                    event: "agentconnect",
+                    caller: "0987654321",
+                    queue: "650",
+                    agentExtension: "101",
+                },
+                summary: {
+                    from: "0987654321",
+                    to: "101",
+                    queue: "650",
+                },
+            },
+        });
+        await nestedDispatcher.flush();
+        nestedDispatcher.stop();
+
+        const auditRows = nestedAudit.getRecent({ linkedid: "1795010000.7" });
+        assert.strictEqual(auditRows.length, 1);
+        assert.strictEqual(auditRows[0].caller, "0987654321");
+        assert.strictEqual(auditRows[0].queue, "650");
+        assert.strictEqual(auditRows[0].agentExtension, "101");
+
         console.log("v2 webhook-dispatcher & audit-log tests passed");
     } finally {
         await fs.rm(tempDir, { recursive: true, force: true });

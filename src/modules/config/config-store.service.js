@@ -2,6 +2,7 @@ const crypto = require("crypto");
 const fs = require("fs/promises");
 const path = require("path");
 const { normalizePublicBaseUrl } = require("../../utils/public-url");
+const { ANSWER_MODES, normalizeAnswerMode } = require("../pbx/asterisk-capabilities");
 
 const CONFIG_FILE_NAME = "config.enc.json";
 const MASTER_KEY_FILE_NAME = ".master.key";
@@ -41,6 +42,7 @@ const CONFIG_FIELDS = [
     { key: "pbxDefaultCallerIdNumber", type: "string", secret: false },
     { key: "pbxDirectTrunkEndpoint", type: "string", secret: false },
     { key: "pbxHangupCause", type: "number", secret: false, min: 0, max: 255 },
+    { key: "pbxAnswerMode", type: "enum", secret: false, options: ANSWER_MODES, defaultValue: "auto" },
     { key: "trunkOutboundEnabled", type: "boolean", secret: false },
     { key: "pbxLogTrackedEvents", type: "boolean", secret: false },
     { key: "pbxLogRawEvents", type: "boolean", secret: false },
@@ -144,6 +146,21 @@ function coerceValue(field, rawValue) {
         }
 
         return ["*"];
+    }
+
+    if (field.type === "enum") {
+        const rawClean = String(rawValue ?? "").trim();
+        const normalized =
+            field.key === "pbxAnswerMode"
+                ? normalizeAnswerMode(rawClean, "")
+                : rawClean.toLowerCase();
+        const candidate = rawClean === "" ? field.defaultValue || "" : normalized;
+        if (Array.isArray(field.options) && !field.options.includes(candidate)) {
+            throw new Error(
+                `Invalid value '${rawValue}' for ${field.key}. Allowed: ${field.options.join(", ")}`
+            );
+        }
+        return candidate;
     }
 
     return rawValue === undefined || rawValue === null ? "" : String(rawValue).trim();

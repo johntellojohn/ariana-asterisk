@@ -49,6 +49,17 @@
         { key: "pbxAmiPassword", label: "Contraseña AMI", type: "password" },
         { key: "pbxOriginateContext", label: "Contexto Originate", type: "text" },
         { key: "pbxCallerIdPrefix", label: "Prefijo CallerID", type: "text" },
+        {
+          key: "pbxAnswerMode",
+          label: "Modo de Atención de Llamada (Versión Asterisk)",
+          type: "select",
+          options: [
+            { value: "auto", label: "Auto (ari_media en >=16.6; extension/bridge en <16.6)" },
+            { value: "extension", label: "extension — MicroSIP / Zoiper / Teléfono IP (Asterisk 11/13/16+)" },
+            { value: "sip_bridge", label: "sip_bridge — Audio Web Navegador vía Bridge SIP (Fase 4B.2)" },
+            { value: "ari_media", label: "ari_media — Audio Web Navegador vía ARI ExternalMedia (>=16.6)" },
+          ],
+        },
         { key: "trunkOutboundEnabled", label: "Habilitar Salientes Troncal", type: "checkbox" },
       ],
     },
@@ -147,9 +158,10 @@
     return `<span class="pill ${cls}">${escapeHtml(upper || "-")}</span>`;
   }
 
-  async function loadOverview() {
+  async function loadOverview(options = {}) {
     try {
-      const data = await apiJson("/admin/api/overview");
+      const qs = options.refreshQueue ? "?refreshQueue=1" : "";
+      const data = await apiJson(`/admin/api/overview${qs}`);
       document.getElementById("sidebar-app-name").textContent = data.gateway.appName || "Edge Appliance";
       document.getElementById("current-user-label").textContent = data.user?.username || "admin";
       document.getElementById("cred-username").value = data.user?.username || "admin";
@@ -157,9 +169,25 @@
       const mustChangeBanner = document.getElementById("must-change-banner");
       mustChangeBanner.classList.toggle("hidden", !data.user?.mustChangePassword);
 
+      const compatBanner = document.getElementById("compat-warning-banner");
+      if (compatBanner) {
+        const warningMsg = data.capabilities?.compatibilityWarning || "";
+        compatBanner.textContent = warningMsg;
+        compatBanner.classList.toggle("hidden", !warningMsg);
+      }
+
       const setupBadge = document.getElementById("setup-badge");
       setupBadge.textContent = data.configStatus.configured ? "Configurado y Listo" : "Setup Pendiente";
       setupBadge.className = `pill ${data.configStatus.configured ? "pill-ok" : "pill-warn"}`;
+
+      const caps = data.capabilities || {};
+      const qSummary = data.queueSummary || {};
+      const extSupportLabel =
+        caps.supportsExternalMedia === true
+          ? "ARI externalMedia: SÍ"
+          : caps.supportsExternalMedia === false
+            ? "Sin externalMedia (<16.6)"
+            : "Probe pendiente";
 
       const kpis = [
         {
@@ -169,10 +197,22 @@
           cls: data.ami.connected ? "pill-ok" : "pill-fail",
         },
         {
+          label: "Asterisk & Modo",
+          value: caps.asteriskVersion ? `v${caps.asteriskVersion}` : "Sin detectar",
+          sub: `Modo: ${caps.effectiveAnswerMode || caps.configuredAnswerMode || "auto"} · ${extSupportLabel}`,
+          cls: caps.compatibleWithConfiguredMode === false ? "pill-warn" : caps.versionDetected ? "pill-ok" : "pill-info",
+        },
+        {
           label: "Issabel ARI WS",
           value: data.ari.connected ? "Activo" : "Inactivo",
           sub: `Sesiones: ${data.ari.activeSessions} activas / ${data.ari.totalSessions} cache`,
           cls: data.ari.connected ? "pill-ok" : "pill-warn",
+        },
+        {
+          label: "Cola FIFO Espera",
+          value: `${qSummary.waitingCalls ?? 0} esperando`,
+          sub: `Timbrando: ${qSummary.ringingCalls ?? 0} · Hablando: ${qSummary.answeredCalls ?? 0}`,
+          cls: (qSummary.waitingCalls ?? 0) > 0 ? "pill-warn" : "pill-ok",
         },
         {
           label: "EVA Cloud WAN",
@@ -205,6 +245,34 @@
         )
         .join("");
 
+      const queueStrip = document.getElementById("queue-overview-strip");
+      if (queueStrip) {
+        const snapshot = qSummary.snapshot || null;
+        const members = Array.isArray(snapshot?.members) ? snapshot.members : [];
+        const waitingList = Array.isArray(qSummary.waitingList) ? qSummary.waitingList : [];
+
+        const membersHtml = members.length
+          ? members
+              .map((m) => {
+                const stateCls = m.paused ? "pill-warn" : m.inCall || m.status === 2 ? "pill-info" : m.status === 1 ? "pill-ok" : "pill-fail";
+                return `<span class="pill ${stateCls}">${escapeHtml(m.extension || m.name || m.interface)}: ${escapeHtml(m.statusLabel)}${m.paused ? " (PAUSADO)" : ""}</span>`;
+              })
+              .join(" ")
+          : `<span class="muted">Sin miembros cargados aún (pulsa "Consultar Cola Ahora" con AMI conectado).</span>`;
+
+        const waitingHtml = waitingList.length
+          ? waitingList
+              .map((w) => `<span class="pill pill-warn">#${escapeHtml(w.position)} · ${escapeHtml(w.from)} (Cola ${escapeHtml(w.queue)}, ${formatDuration(w.waitSeconds)})</span>`)
+              .join(" ")
+          : `<span class="muted">Sin llamantes en fila ahora.</span>`;
+
+        queueStrip.innerHTML = `
+          <div class="queue-strip-row"><strong>Miembros Cola:</strong> ${membersHtml}</div>
+          <div class="queue-strip-row"><strong>Fila FIFO Activa:</strong> ${waitingHtml}</div>
+          ${snapshot?.collectedAt ? `<div class="muted">Última foto AMI QueueStatus: ${escapeHtml(formatTime(snapshot.collectedAt))}</div>` : ""}
+        `;
+      }
+
       const callsBody = document.getElementById("calls-tbody");
       if (!data.calls || data.calls.length === 0) {
         callsBody.innerHTML = `<tr><td colspan="7" class="muted">Sin llamadas registradas aún.</td></tr>`;
@@ -215,7 +283,7 @@
             <tr>
               <td><code>${escapeHtml(call.linkedid)}</code></td>
               <td>${escapeHtml(call.from)}</td>
-              <td>${escapeHtml(call.queue)} / ${escapeHtml(call.extension)}</td>
+              <td>${call.queuePosition ? `<span class="pill pill-warn">#${escapeHtml(call.queuePosition)}</span> ` : ""}${escapeHtml(call.queue)} / ${escapeHtml(call.extension)}</td>
               <td>${statusPill(call.status)}</td>
               <td>${formatDuration(call.waitSeconds)}</td>
               <td>${call.talkSeconds > 0 ? formatDuration(call.talkSeconds) : "-"}</td>
@@ -286,6 +354,20 @@
                 <label class="checkbox-field">
                   <input type="checkbox" data-key="${field.key}" data-type="checkbox" ${val ? "checked" : ""} />
                   <span>${escapeHtml(field.label)}</span>
+                </label>`;
+            }
+            if (field.type === "select") {
+              const currentVal = String(val ?? "auto");
+              const optionsHtml = (field.options || [])
+                .map(
+                  (opt) =>
+                    `<option value="${escapeHtml(opt.value)}" ${opt.value === currentVal ? "selected" : ""}>${escapeHtml(opt.label)}</option>`
+                )
+                .join("");
+              return `
+                <label class="field">
+                  <span>${escapeHtml(field.label)}</span>
+                  <select data-key="${field.key}" data-type="select">${optionsHtml}</select>
                 </label>`;
             }
             const displayVal = field.type === "list"
@@ -443,6 +525,9 @@
   });
 
   document.getElementById("auto-refresh-toggle").addEventListener("change", setupAutoRefresh);
+  document.getElementById("refresh-queue-btn")?.addEventListener("click", () => {
+    loadOverview({ refreshQueue: true });
+  });
   document.getElementById("flush-outbox-btn").addEventListener("click", async () => {
     await apiJson("/admin/api/outbox/flush", { method: "POST" });
     loadOverview();

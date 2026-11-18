@@ -6,6 +6,7 @@ const auditLog = require("../audit/audit-log.service");
 const callState = require("./call-state.service");
 const { classifyChannel } = require("./call-state.service");
 const queuePresence = require("./queue-presence.service");
+const { parseAsteriskVersion } = require("./asterisk-capabilities");
 
 let gcTimer = null;
 
@@ -52,6 +53,9 @@ let started = false;
 let connected = false;
 let lastAmiEventTime = null;
 let lastAmiError = null;
+let amiAsteriskRawVersion = null;
+let amiAsteriskDetectedAt = null;
+let lastQueueStatusSnapshot = null;
 
 const callEvents = [];
 const callsByLinkedId = new Map();
@@ -89,6 +93,7 @@ function start() {
         lastAmiError = null;
         console.log(`[pbx] AMI connected to ${env.pbxAmiHost}:${env.pbxAmiPort}`);
         enableAmiEvents();
+        probeAmiAsteriskVersion().catch(() => {});
     });
 
     ami.on("disconnect", () => {
@@ -131,6 +136,9 @@ function stop() {
     ami = null;
     started = false;
     connected = false;
+    amiAsteriskRawVersion = null;
+    amiAsteriskDetectedAt = null;
+    lastQueueStatusSnapshot = null;
 }
 
 function restart() {
@@ -543,6 +551,8 @@ function buildCallResult(call) {
 }
 
 function getStatus() {
+    const parsed = parseAsteriskVersion(amiAsteriskRawVersion);
+
     return {
         enabled: env.pbxAmiEnabled,
         started,
@@ -551,6 +561,10 @@ function getStatus() {
         port: env.pbxAmiPort,
         username: env.pbxAmiUsername,
         outboundEnabled: env.trunkOutboundEnabled,
+        configuredAnswerMode: env.pbxAnswerMode,
+        asteriskVersion: parsed.parsedVersion,
+        asteriskRawVersion: parsed.raw,
+        asteriskDetectedAt: amiAsteriskDetectedAt,
         activeCallsCount: callState.getActiveCount(),
         trackedCallsCount: callsByLinkedId.size,
         lastAmiEventTime,
@@ -1993,13 +2007,258 @@ async function syncQueuePresence({ online_extensions = [], all_extensions = [], 
     return summary;
 }
 
-async function getQueueStatus(queue = "") {
-    ensureReady();
-    const action = { Action: "QueueStatus" };
-    if (queue) {
-        action.Queue = String(queue).trim();
+function describeMemberDeviceStatus(statusCode) {
+    const code = Number(statusCode);
+    const map = {
+        0: "UNKNOWN",
+        1: "NOT_INUSE",
+        2: "INUSE",
+        3: "BUSY",
+        4: "INVALID",
+        5: "UNAVAILABLE",
+        6: "RINGING",
+        7: "RINGINUSE",
+        8: "ONHOLD",
+    };
+
+    return map[code] || String(statusCode ?? "UNKNOWN");
+}
+
+function parseCommandOutputText(response) {
+    if (!response) return "";
+    if (typeof response === "string") return response;
+    if (Array.isArray(response)) return response.join(" ");
+    const candidate = response.output || response.content || response.data || response.response || "";
+    if (Array.isArray(candidate)) return candidate.join(" ");
+    return String(candidate || "");
+}
+
+async function probeAmiAsteriskVersion() {
+    if (!ami || !connected) {
+        return null;
     }
-    return runAmiAction(action);
+
+    let rawCandidate = "";
+    try {
+        const coreSettings = await runAmiAction({ Action: "CoreSettings" });
+        rawCandidate = String(
+            coreSettings?.asteriskversion ||
+                coreSettings?.AsteriskVersion ||
+                coreSettings?.coreversion ||
+                ""
+        ).trim();
+    } catch (_err) {
+        rawCandidate = "";
+    }
+
+    if (!rawCandidate) {
+        try {
+            const cmdRes = await runAmiAction({
+                Action: "Command",
+                Command: "core show version",
+            });
+            rawCandidate = parseCommandOutputText(cmdRes).trim();
+        } catch (_err) {
+            rawCandidate = "";
+        }
+    }
+
+    if (!rawCandidate) {
+        return null;
+    }
+
+    const parsed = parseAsteriskVersion(rawCandidate);
+    if (parsed.detected) {
+        amiAsteriskRawVersion = parsed.raw;
+        amiAsteriskDetectedAt = new Date().toISOString();
+        console.log("[pbx] Asterisk version detected via AMI", {
+            version: parsed.parsedVersion,
+            raw: parsed.raw,
+        });
+    }
+
+    return parsed;
+}
+
+function collectQueueStatusFromAmi(amiClient, queue = "", timeoutMs = 2500) {
+    const cleanQueue = String(queue || "").trim();
+    const actionId = `qs-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const action = {
+        Action: "QueueStatus",
+        ActionID: actionId,
+        ...(cleanQueue ? { Queue: cleanQueue } : {}),
+    };
+
+    return new Promise((resolve, reject) => {
+        const params = [];
+        const members = [];
+        const entries = [];
+        const events = [];
+        let settled = false;
+        let timer = null;
+        let actionAck = null;
+
+        const finish = (timedOut = false) => {
+            if (settled) return;
+            settled = true;
+            if (timer) {
+                clearTimeout(timer);
+                timer = null;
+            }
+            if (typeof amiClient.removeListener === "function") {
+                amiClient.removeListener("managerevent", onManagerEvent);
+            } else if (typeof amiClient.off === "function") {
+                amiClient.off("managerevent", onManagerEvent);
+            }
+
+            const snapshot = {
+                ok: true,
+                queue: cleanQueue || null,
+                collectedAt: new Date().toISOString(),
+                timedOut,
+                response: actionAck,
+                params,
+                members,
+                entries,
+                events,
+            };
+            resolve(snapshot);
+        };
+
+        const onManagerEvent = (rawEv = {}) => {
+            const evActionId = String(rawEv.actionid || rawEv.ActionID || "").trim();
+            if (evActionId !== actionId) {
+                return;
+            }
+
+            const evName = normalizeEventName(rawEv);
+            const evQueue = String(rawEv.queue || rawEv.Queue || cleanQueue || "").trim();
+
+            if (evName === "queueparams") {
+                const paramItem = {
+                    queue: evQueue,
+                    max: Number(rawEv.max ?? rawEv.Max ?? 0),
+                    calls: Number(rawEv.calls ?? rawEv.Calls ?? 0),
+                    holdTime: Number(rawEv.holdtime ?? rawEv.Holdtime ?? rawEv.HoldTime ?? 0),
+                    talkTime: Number(rawEv.talktime ?? rawEv.TalkTime ?? 0),
+                    completed: Number(rawEv.completed ?? rawEv.Completed ?? 0),
+                    abandoned: Number(rawEv.abandoned ?? rawEv.Abandoned ?? 0),
+                    serviceLevel: Number(rawEv.servicelevel ?? rawEv.ServiceLevel ?? 0),
+                    serviceLevelPerf: Number(rawEv.servicelevelperf ?? rawEv.ServicelevelPerf ?? 0),
+                    strategy: String(rawEv.strategy || rawEv.Strategy || "").trim(),
+                };
+                params.push(paramItem);
+                events.push({ Event: "QueueParams", Queue: evQueue, ...paramItem });
+                return;
+            }
+
+            if (evName === "queuemember") {
+                const iface = String(
+                    rawEv.location || rawEv.Location || rawEv.interface || rawEv.Interface || ""
+                ).trim();
+                const stateIface = String(rawEv.stateinterface || rawEv.StateInterface || iface).trim();
+                const statusCode = Number(rawEv.status ?? rawEv.Status ?? 0);
+                const paused = ["1", "true", "yes"].includes(
+                    String(rawEv.paused ?? rawEv.Paused ?? "0").trim().toLowerCase()
+                );
+                const inCall = ["1", "true", "yes"].includes(
+                    String(rawEv.incall ?? rawEv.InCall ?? "0").trim().toLowerCase()
+                );
+                const memberName = String(rawEv.name || rawEv.Name || iface).trim();
+                const memberItem = {
+                    queue: evQueue,
+                    name: memberName,
+                    extension: extractExtensionNumber(iface || stateIface || memberName),
+                    interface: iface,
+                    stateInterface: stateIface,
+                    membership: String(rawEv.membership || rawEv.Membership || "").trim(),
+                    penalty: Number(rawEv.penalty ?? rawEv.Penalty ?? 0),
+                    paused,
+                    pausedReason: String(rawEv.pausedreason || rawEv.PausedReason || "").trim(),
+                    status: Number.isFinite(statusCode) ? statusCode : 0,
+                    statusLabel: describeMemberDeviceStatus(statusCode),
+                    inCall,
+                    callsTaken: Number(rawEv.callstaken ?? rawEv.CallsTaken ?? 0),
+                    lastCall: Number(rawEv.lastcall ?? rawEv.LastCall ?? 0),
+                };
+                members.push(memberItem);
+                events.push({
+                    Event: "QueueMember",
+                    Queue: evQueue,
+                    Name: memberItem.name,
+                    Interface: iface,
+                    Location: iface,
+                    StateInterface: stateIface,
+                    Membership: memberItem.membership,
+                    Paused: paused ? "1" : "0",
+                    PausedReason: memberItem.pausedReason,
+                    Status: String(memberItem.status),
+                    InCall: inCall ? "1" : "0",
+                    CallsTaken: String(memberItem.callsTaken),
+                    LastCall: String(memberItem.lastCall),
+                });
+                return;
+            }
+
+            if (evName === "queueentry") {
+                const entryItem = {
+                    queue: evQueue,
+                    position: Number(rawEv.position ?? rawEv.Position ?? 0),
+                    channel: String(rawEv.channel || rawEv.Channel || "").trim(),
+                    uniqueid: String(rawEv.uniqueid || rawEv.Uniqueid || "").trim(),
+                    callerIdNum: String(rawEv.calleridnum || rawEv.CallerIDNum || "").trim(),
+                    callerIdName: String(rawEv.calleridname || rawEv.CallerIDName || "").trim(),
+                    connectedLineNum: String(rawEv.connectedlinenum || rawEv.ConnectedLineNum || "").trim(),
+                    waitSeconds: Number(rawEv.wait ?? rawEv.Wait ?? 0),
+                };
+                entries.push(entryItem);
+                events.push({ Event: "QueueEntry", Queue: evQueue, ...entryItem });
+                return;
+            }
+
+            if (evName === "queuestatuscomplete") {
+                events.push({ Event: "QueueStatusComplete", Queue: evQueue });
+                finish(false);
+            }
+        };
+
+        amiClient.on("managerevent", onManagerEvent);
+
+        timer = setTimeout(() => {
+            finish(true);
+        }, Math.max(200, Number(timeoutMs) || 2500));
+
+        amiClient.action(action, (error, response) => {
+            if (error) {
+                if (!settled) {
+                    settled = true;
+                    if (timer) {
+                        clearTimeout(timer);
+                        timer = null;
+                    }
+                    if (typeof amiClient.removeListener === "function") {
+                        amiClient.removeListener("managerevent", onManagerEvent);
+                    } else if (typeof amiClient.off === "function") {
+                        amiClient.off("managerevent", onManagerEvent);
+                    }
+                    reject(error);
+                }
+                return;
+            }
+            actionAck = response;
+        });
+    });
+}
+
+async function getQueueStatus(queue = "", options = {}) {
+    ensureReady();
+    const snapshot = await collectQueueStatusFromAmi(ami, queue, options.timeoutMs || 2500);
+    lastQueueStatusSnapshot = snapshot;
+    return snapshot;
+}
+
+function getCachedQueueSnapshot() {
+    return lastQueueStatusSnapshot;
 }
 
 module.exports = {
@@ -2028,9 +2287,16 @@ module.exports = {
     registerActiveExtensionChecker,
     isExtensionBusyLocally,
     getQueueStatus,
+    getCachedQueueSnapshot,
+    probeAmiAsteriskVersion,
     extractExtensionNumber,
     __test: {
         updateCallSummary,
+        collectQueueStatusFromAmi,
+        setAmiAsteriskVersionForTest(raw) {
+            amiAsteriskRawVersion = raw || null;
+            amiAsteriskDetectedAt = raw ? new Date().toISOString() : null;
+        },
         resetCallTracking() {
             callEvents.length = 0;
             callsByLinkedId.clear();

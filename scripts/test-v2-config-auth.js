@@ -84,9 +84,19 @@ async function run() {
         await store.updateConfig({
             pbxAmiPassword: masked.values.pbxAmiPassword,
             pbxAmiPort: 5039,
+            pbxAnswerMode: "extension",
         });
         assert.strictEqual(fakeEnv.pbxAmiPassword, "super-secret-ami-password");
         assert.strictEqual(fakeEnv.pbxAmiPort, 5039);
+        assert.strictEqual(fakeEnv.pbxAnswerMode, "extension");
+
+        let invalidModeRejected = false;
+        try {
+            await store.updateConfig({ pbxAnswerMode: "modo_inexistente" });
+        } catch (_err) {
+            invalidModeRejected = true;
+        }
+        assert.strictEqual(invalidModeRejected, true);
 
         // Verify disk file is encrypted (plaintext password must not appear)
         const diskRaw = await fs.readFile(path.join(tempDir, "config.enc.json"), "utf8");
@@ -94,7 +104,7 @@ async function run() {
         assert.strictEqual(diskRaw.includes("eva-token-987654"), false);
 
         // Reload in new ConfigStoreService instance from disk
-        const reloadedEnv = { ...fakeEnv, pbxAmiHost: "", laravelApiToken: "", pbxAmiPassword: "" };
+        const reloadedEnv = { ...fakeEnv, pbxAmiHost: "", laravelApiToken: "", pbxAmiPassword: "", pbxAnswerMode: "auto" };
         const store2 = new ConfigStoreService();
         const status2 = await store2.init(reloadedEnv, { dataDir: tempDir });
         assert.strictEqual(status2.source, "disk");
@@ -102,6 +112,7 @@ async function run() {
         assert.strictEqual(reloadedEnv.pbxAmiHost, "192.168.100.34");
         assert.strictEqual(reloadedEnv.pbxAmiPassword, "super-secret-ami-password");
         assert.strictEqual(reloadedEnv.laravelApiToken, "eva-token-987654");
+        assert.strictEqual(reloadedEnv.pbxAnswerMode, "extension");
 
         // 3. Autonomous AdminAuthService: bootstrap, login, cookie verification, credential rotation, rate limit
         const auth = new AdminAuthService();

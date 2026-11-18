@@ -113,18 +113,26 @@ async function run() {
         });
         assert.strictEqual(overviewRes.status, 200);
         assert.strictEqual(overviewRes.json.ok, true);
+        assert.ok(overviewRes.json.capabilities && "effectiveAnswerMode" in overviewRes.json.capabilities);
+        assert.ok(overviewRes.json.queueSummary && Array.isArray(overviewRes.json.queueSummary.waitingList));
+
+        const healthRes = await request(server, "GET", "/api/health");
+        assert.strictEqual(healthRes.status, 200);
+        assert.ok(healthRes.json.capabilities && "supportsExternalMedia" in healthRes.json.capabilities);
 
         const saveCfgRes = await request(server, "POST", "/admin/api/config", {
             headers: { Cookie: cookieHeader },
             body: {
                 pbxAmiEnabled: false,
                 ariEnabled: false,
+                pbxAnswerMode: "extension",
                 laravelApiUrl: "https://eva.hospital.local",
                 laravelTenantDatabase: "sigcrm_hospital_test",
             },
         });
         assert.strictEqual(saveCfgRes.status, 200);
         assert.strictEqual(saveCfgRes.json.values.laravelTenantDatabase, "sigcrm_hospital_test");
+        assert.strictEqual(saveCfgRes.json.values.pbxAnswerMode, "extension");
 
         const auditRes = await request(server, "GET", "/admin/api/audit", {
             headers: { Cookie: cookieHeader },

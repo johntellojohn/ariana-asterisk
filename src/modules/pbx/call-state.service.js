@@ -308,11 +308,16 @@ class CallStateService {
         const call = this.ensureCall(linkedid, { ...event, timestamp: nowIso });
         this.updatePrimaryChannelCandidate(call, event);
 
-        if (event.callerIdNum && !call.callerNumber && channel === call.primaryChannel) {
-            call.callerNumber = String(event.callerIdNum).trim();
+        const callerNum = String(event.callerIdNum ?? event.caller ?? "").trim();
+        const callerName = String(event.callerIdName ?? event.callerName ?? "").trim();
+        const canUpdateCallerIdentity =
+            !channel || channel === call.primaryChannel || channelKind !== "agent_leg";
+
+        if (callerNum && !call.callerNumber && canUpdateCallerIdentity) {
+            call.callerNumber = callerNum;
         }
-        if (event.callerIdName && !call.callerName && channel === call.primaryChannel) {
-            call.callerName = String(event.callerIdName).trim();
+        if (callerName && !call.callerName && canUpdateCallerIdentity) {
+            call.callerName = callerName;
         }
         if (event.queue && !call.queue) {
             call.queue = String(event.queue).trim();
@@ -346,8 +351,11 @@ class CallStateService {
             if (!call.queueJoinedAt) {
                 call.queueJoinedAt = nowIso;
             }
-            if (event.callerIdNum && !call.callerNumber) {
-                call.callerNumber = String(event.callerIdNum).trim();
+            if (callerNum && !call.callerNumber) {
+                call.callerNumber = callerNum;
+            }
+            if (callerName && !call.callerName) {
+                call.callerName = callerName;
             }
             this.transitionForward(call, "QUEUE_WAITING");
 

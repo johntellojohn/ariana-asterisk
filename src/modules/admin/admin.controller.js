@@ -9,6 +9,7 @@ const webhookDispatcher = require("../laravel/webhook-dispatcher.service");
 const laravelService = require("../laravel/laravel.service");
 const pbxService = require("../pbx/pbx.service");
 const callState = require("../pbx/call-state.service");
+const { resolveGatewayCapabilities } = require("../pbx/asterisk-capabilities");
 const ariService = require("../ari/ari.service");
 const ariMediaService = require("../ari/ari-media.service");
 
@@ -102,9 +103,19 @@ function renderAdminHtml() {
     <div id="must-change-banner" class="alert alert-warn hidden">
       Estás usando la contraseña temporal inicial. Actualízala en la pestaña <strong>Configuración PBX / EVA</strong>.
     </div>
+    <div id="compat-warning-banner" class="alert alert-warn hidden"></div>
 
     <section id="tab-dashboard" class="tab-panel active">
       <div class="kpi-grid" id="kpi-grid"></div>
+      <div class="panel-card">
+        <div class="panel-head">
+          <h2>Cola de Espera y Miembros Issabel</h2>
+          <div class="panel-actions">
+            <button id="refresh-queue-btn" class="btn btn-secondary btn-sm" type="button">Consultar Cola Ahora</button>
+          </div>
+        </div>
+        <div id="queue-overview-strip" class="muted">Cargando estado de cola y extensiones...</div>
+      </div>
       <div class="panel-card">
         <div class="panel-head">
           <h2>Llamadas Activas y Recientes (Tiempos: Espera vs Conversación)</h2>
@@ -323,27 +334,84 @@ function computeSecondsBetween(startIso, endIso) {
     return Math.round((endMs - startMs) / 1000);
 }
 
-function getOverviewApi(_req, res) {
-    const legacyCalls = pbxService.getCallsSummary().slice(0, 40);
+async function getOverviewApi(req, res) {
+    const pbxStatus = pbxService.getStatus();
+    const ariStatus = ariService.getStatus();
+    const capabilities = resolveGatewayCapabilities({
+        ariStatus,
+        pbxStatus,
+        configuredAnswerMode: env.pbxAnswerMode,
+    });
+
+    const forceRefreshQueue = String(req.query?.refreshQueue || "") === "1";
+    const cachedQueue = pbxService.getCachedQueueSnapshot();
+    const snapshotAgeMs = cachedQueue?.collectedAt ? Date.now() - Date.parse(cachedQueue.collectedAt) : Infinity;
+
+    if (pbxStatus.connected && (forceRefreshQueue || !cachedQueue || snapshotAgeMs > 12000)) {
+        try {
+            const targetQueue = String(req.query?.queue || "").trim();
+            await pbxService.getQueueStatus(targetQueue, { timeoutMs: forceRefreshQueue ? 2000 : 700 });
+        } catch (_err) {
+            // Keep existing snapshot if live query fails
+        }
+    }
+
+    const legacyCalls = pbxService.getCallsSummary().slice(0, 60);
+    const activeWaitingStates = callState
+        .getAllCalls()
+        .filter((item) => ["QUEUE_WAITING", "RINGING"].includes(String(item.status || "").toUpperCase()))
+        .sort((a, b) => Date.parse(a.queueJoinedAt || a.firstEventAt || 0) - Date.parse(b.queueJoinedAt || b.firstEventAt || 0));
+
+    const queuePositionByLinkedId = new Map();
+    activeWaitingStates.forEach((item, index) => {
+        queuePositionByLinkedId.set(item.linkedid, index + 1);
+    });
+
     const mergedCalls = legacyCalls.map((call) => {
         const state = callState.getCall(call.linkedid);
         const waitEnd = state?.answeredAt || state?.endedAt || null;
         const waitStart = state?.queueJoinedAt || state?.firstEventAt || call.firstEventTime;
         const waitSeconds = computeSecondsBetween(waitStart, waitEnd);
         const talkSeconds = state?.answeredAt ? computeSecondsBetween(state.answeredAt, state.endedAt) : 0;
+        const status = state?.status || call.status;
 
         return {
             linkedid: call.linkedid,
             from: state?.callerNumber || call.from || "-",
             queue: state?.queue || "-",
             extension: state?.answeredExtension || state?.targetExtension || call.to || "-",
-            status: state?.status || call.status,
+            status,
             answered: Boolean(state?.answered || call.answered),
+            queuePosition: queuePositionByLinkedId.get(call.linkedid) || null,
             waitSeconds,
             talkSeconds,
+            firstEventTime: state?.firstEventAt || call.firstEventTime,
             lastEventTime: state?.lastEventAt || call.lastEventTime,
         };
     });
+
+    const rankStatus = (status) => {
+        const upper = String(status || "").toUpperCase();
+        if (upper === "QUEUE_WAITING") return 1;
+        if (upper === "RINGING") return 2;
+        if (upper === "ANSWERED" || upper === "ANSWER") return 3;
+        return 4;
+    };
+
+    mergedCalls.sort((a, b) => {
+        const ra = rankStatus(a.status);
+        const rb = rankStatus(b.status);
+        if (ra !== rb) return ra - rb;
+        if (ra < 4) {
+            return Date.parse(a.firstEventTime || a.lastEventTime || 0) - Date.parse(b.firstEventTime || b.lastEventTime || 0);
+        }
+        return Date.parse(b.lastEventTime || 0) - Date.parse(a.lastEventTime || 0);
+    });
+
+    const waitingCalls = mergedCalls.filter((c) => String(c.status).toUpperCase() === "QUEUE_WAITING").length;
+    const ringingCalls = mergedCalls.filter((c) => String(c.status).toUpperCase() === "RINGING").length;
+    const answeredCalls = mergedCalls.filter((c) => ["ANSWERED", "ANSWER"].includes(String(c.status).toUpperCase())).length;
+    const latestSnapshot = pbxService.getCachedQueueSnapshot();
 
     return res.json({
         ok: true,
@@ -356,12 +424,37 @@ function getOverviewApi(_req, res) {
         },
         user: adminAuth.getPublicUser(),
         configStatus: configStore.getStatus(),
-        ami: pbxService.getStatus(),
-        ari: ariService.getStatus(),
+        capabilities,
+        ami: pbxStatus,
+        ari: ariStatus,
         rtp: ariMediaService.getMediaStats(),
         outbox: webhookDispatcher.getStats(),
         heartbeat: heartbeatService.getStatus(),
-        calls: mergedCalls,
+        queueSummary: {
+            waitingCalls,
+            ringingCalls,
+            answeredCalls,
+            waitingList: activeWaitingStates.slice(0, 15).map((item, idx) => ({
+                position: idx + 1,
+                linkedid: item.linkedid,
+                from: item.callerNumber || "-",
+                queue: item.queue || "-",
+                status: item.status,
+                targetExtension: item.targetExtension || "-",
+                waitSeconds: computeSecondsBetween(item.queueJoinedAt || item.firstEventAt, null),
+            })),
+            snapshot: latestSnapshot
+                ? {
+                      queue: latestSnapshot.queue,
+                      collectedAt: latestSnapshot.collectedAt,
+                      timedOut: Boolean(latestSnapshot.timedOut),
+                      params: latestSnapshot.params || [],
+                      members: latestSnapshot.members || [],
+                      entries: latestSnapshot.entries || [],
+                  }
+                : null,
+        },
+        calls: mergedCalls.slice(0, 40),
     });
 }
 
@@ -425,6 +518,10 @@ async function updateConfigApi(req, res) {
         }
     }
 
+    if (result.changedKeys.includes("pbxAnswerMode")) {
+        heartbeatService.sendOnce().catch(() => {});
+    }
+
     auditLog.record({
         category: "config",
         type: "config_updated",
@@ -466,14 +563,29 @@ async function runDiagnosticsApi(req, res) {
         });
     } else {
         try {
+            if (!pbxStatus.asteriskVersion) {
+                await pbxService.probeAmiAsteriskVersion().catch(() => {});
+            }
+            const refreshedPbx = pbxService.getStatus();
             const qRes = await pbxService.getQueueStatus(queue);
-            const events = Array.isArray(qRes && qRes.events) ? qRes.events : [];
-            const members = events.filter((item) => String(item.Event || item.event || "").toLowerCase() === "queuemember");
+            const members = Array.isArray(qRes?.members)
+                ? qRes.members
+                : (Array.isArray(qRes?.events) ? qRes.events : []).filter(
+                      (item) => String(item.Event || item.event || "").toLowerCase() === "queuemember"
+                  );
+            const entries = Array.isArray(qRes?.entries) ? qRes.entries : [];
+            const activeCount = members.filter((m) => !m.paused).length;
+            const pausedCount = members.filter((m) => m.paused).length;
+            const memberPreview = members
+                .slice(0, 8)
+                .map((m) => `${m.extension || m.name || m.interface}=${m.statusLabel || m.status}${m.paused ? "[PAUSADO]" : ""}`)
+                .join(", ");
+
             checks.push({
                 id: "ami",
                 title: `Issabel AMI + Cola ${queue}`,
-                status: "ok",
-                detail: `Conectado a ${pbxStatus.host}:${pbxStatus.port}. Miembros en cola ${queue}: ${members.length}`,
+                status: members.length > 0 ? "ok" : "warn",
+                detail: `Conectado a ${pbxStatus.host}:${pbxStatus.port} (Asterisk ${refreshedPbx.asteriskVersion || "?"}). Miembros en cola ${queue}: ${members.length} (activos: ${activeCount}, pausados: ${pausedCount})${memberPreview ? ` [${memberPreview}]` : ""} | En espera: ${entries.length}`,
             });
         } catch (error) {
             checks.push({
@@ -485,7 +597,7 @@ async function runDiagnosticsApi(req, res) {
         }
     }
 
-    // 3. ARI REST & WS
+    // 3. ARI REST & WS + Version Compatibility
     const ariStatus = ariService.getStatus();
     if (!env.ariEnabled) {
         checks.push({
@@ -496,12 +608,29 @@ async function runDiagnosticsApi(req, res) {
         });
     } else {
         try {
+            await ariService.probeAsteriskInfo().catch(() => {});
             const info = await ariService.ariRequest("GET", "/asterisk/info");
+            const latestAri = ariService.getStatus();
+            const caps = resolveGatewayCapabilities({
+                ariStatus: {
+                    ...latestAri,
+                    asteriskRawVersion: info?.data?.system?.version || latestAri.asteriskRawVersion,
+                },
+                pbxStatus: pbxService.getStatus(),
+                configuredAnswerMode: env.pbxAnswerMode,
+            });
+            const extMediaTxt =
+                caps.supportsExternalMedia === true
+                    ? "externalMedia ARI: SÍ (>=16.6)"
+                    : caps.supportsExternalMedia === false
+                      ? "externalMedia ARI: NO (<16.6)"
+                      : "externalMedia ARI: indeterminado";
+
             checks.push({
                 id: "ari",
-                title: "Issabel ARI (REST + WebSocket)",
-                status: ariStatus.connected ? "ok" : "warn",
-                detail: `REST OK (Asterisk ${info?.system?.version || "?"}) | WebSocket: ${ariStatus.connected ? "conectado" : "desconectado"}`,
+                title: "Issabel ARI + Compatibilidad Asterisk",
+                status: ariStatus.connected && caps.compatibleWithConfiguredMode ? "ok" : "warn",
+                detail: `REST OK (Asterisk ${info?.data?.system?.version || caps.asteriskVersion || "?"}) | WebSocket: ${ariStatus.connected ? "conectado" : "desconectado"} | ${extMediaTxt} | Modo: config=${caps.configuredAnswerMode}, efectivo=${caps.effectiveAnswerMode}`,
             });
         } catch (error) {
             checks.push({

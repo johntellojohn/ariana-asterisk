@@ -9,6 +9,7 @@ const ariService = require("./modules/ari/ari.service");
 const { attachAriWebSocketServer } = require("./modules/ari/ari.websocket");
 const { attachMobileWebSocketServer } = require("./modules/mobile/mobile.websocket");
 const pbxService = require("./modules/pbx/pbx.service");
+const { resolveGatewayCapabilities } = require("./modules/pbx/asterisk-capabilities");
 
 let server = null;
 
@@ -54,6 +55,11 @@ async function bootstrap() {
             const ariStatus = ariService.getStatus();
             const outboxStats = webhookDispatcher.getStats();
             const mem = process.memoryUsage();
+            const capabilities = resolveGatewayCapabilities({
+                ariStatus,
+                pbxStatus,
+                configuredAnswerMode: env.pbxAnswerMode,
+            });
             return {
                 gateway_version: env.buildVersion,
                 uptime_seconds: Math.round(process.uptime()),
@@ -67,6 +73,12 @@ async function bootstrap() {
                 memory_heap_used_mb: Math.round((mem.heapUsed / (1024 * 1024)) * 10) / 10,
                 webhook_last_latency_ms: outboxStats.lastLatencyMs ?? null,
                 webhook_avg_latency_ms: outboxStats.avgLatencyMs ?? null,
+                asterisk_version: capabilities.asteriskVersion,
+                asterisk_major: capabilities.asteriskMajor,
+                asterisk_minor: capabilities.asteriskMinor,
+                supports_external_media: capabilities.supportsExternalMedia,
+                configured_answer_mode: capabilities.configuredAnswerMode,
+                effective_answer_mode: capabilities.effectiveAnswerMode,
             };
         },
     });
