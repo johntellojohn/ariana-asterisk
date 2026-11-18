@@ -6,7 +6,7 @@ services:
     container_name: ariana-asterisk-gateway
     restart: unless-stopped
     ports:
-      - "${HOST_PORT:-366}:${PORT:-3002}"
+      - "${API_HOST_PORT:-${HOST_PORT:-366}}:${PORT:-3002}"
       - "${ARI_EXTERNAL_MEDIA_PORT_START:-46000}-${ARI_EXTERNAL_MEDIA_PORT_END:-46200}:${ARI_EXTERNAL_MEDIA_PORT_START:-46000}-${ARI_EXTERNAL_MEDIA_PORT_END:-46200}/udp"
     env_file:
       - .env
