@@ -25,9 +25,14 @@ const AGENT_LOCAL_CONTEXTS = [
     "@from-queue",
     "@ext-queues",
     "@simulador-agente",
+    "@ariana-web-agent",
     "@from-internal",
     "@from-did-direct",
 ];
+
+function isBridgeLegChannel(channelName = "") {
+    return /^(SIP|PJSIP)\/ariana-bridge-sip/i.test(String(channelName || "").trim());
+}
 
 const NON_SIGNALING_AGENT_EXACT_NAMES = new Set([
     "varset",
@@ -78,6 +83,10 @@ function classifyChannel(channelName = "", context = "") {
             return "caller_leg";
         }
         return "local_other";
+    }
+
+    if (isBridgeLegChannel(ch)) {
+        return "bridge_leg";
     }
 
     if (/^(SIP|PJSIP|DAHDI|IAX2|MOTIF|MOBILE)\//i.test(ch)) {
@@ -220,6 +229,10 @@ class CallStateService {
 
         if (kind === "agent_leg") {
             call.agentChannels.add(channel);
+            return;
+        }
+
+        if (kind === "bridge_leg") {
             return;
         }
 
@@ -383,6 +396,9 @@ class CallStateService {
 
         // Handle ringing / agent assignment
         if (eventName === "agentcalled" || eventName === "dialbegin") {
+            if (channelKind === "bridge_leg" || classifyChannel(destChannel) === "bridge_leg") {
+                return this.buildNoop(call, "bridge_leg_dial_ignored");
+            }
             if (!call.ringStartedAt) {
                 call.ringStartedAt = nowIso;
             }
@@ -446,6 +462,10 @@ class CallStateService {
                 return this.handleRealAnswer(call, nowIso, "dialend", event);
             }
 
+            if (channelKind === "bridge_leg" || classifyChannel(destChannel) === "bridge_leg") {
+                return this.buildNoop(call, "bridge_leg_dialend_ignored");
+            }
+
             // DialEnd fail before answer is ONLY terminal if the call has no primary queue wait or primary channel hung up
             const mappedFail = mapDialStatusToTerminal(dialStatus);
             const isPrimaryOrNoQueue = !call.queue && (!channel || channel === call.primaryChannel || Boolean(options.isOutbound));
@@ -463,7 +483,7 @@ class CallStateService {
             const isPrimary = Boolean(call.primaryChannel && channel === call.primaryChannel);
             const isAgentLeg = call.agentChannels.has(channel) || channelKind === "agent_leg";
 
-            if (!isPrimary || isAgentLeg) {
+            if (!isPrimary || isAgentLeg || channelKind === "bridge_leg") {
                 return this.buildNoop(call, "subchannel_hangup_ignored");
             }
 
@@ -490,10 +510,18 @@ class CallStateService {
         if (!call.answeredAt) {
             call.answeredAt = nowIso;
         }
+        const isBridgeLegEvent =
+            isBridgeLegChannel(event.destChannel) ||
+            isBridgeLegChannel(event.channel);
         const ext = extractExt(
             event.destExtension || event.extension || event.memberName || event.interface || event.destChannel || event.channel
         );
-        if (ext && (!call.primaryChannel || !String(call.primaryChannel).includes(ext))) {
+        if (
+            ext &&
+            !isBridgeLegEvent &&
+            !/^88\d{8}$/.test(ext) &&
+            (!call.primaryChannel || !String(call.primaryChannel).includes(ext))
+        ) {
             call.answeredExtension = ext;
             call.targetExtension = call.targetExtension || ext;
         }
@@ -603,5 +631,6 @@ const instance = new CallStateService();
 module.exports = instance;
 module.exports.CallStateService = CallStateService;
 module.exports.classifyChannel = classifyChannel;
+module.exports.isBridgeLegChannel = isBridgeLegChannel;
 module.exports.isTerminalStatus = isTerminalStatus;
 

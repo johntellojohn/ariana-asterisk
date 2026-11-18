@@ -85,6 +85,19 @@
         { key: "callRecordingTranscribe", label: "Transcribir Audio", type: "checkbox" },
       ],
     },
+    {
+      title: "6. SIP Media Bridge (Asterisk 13.x Browser Audio)",
+      fields: [
+        { key: "sipBridgeEnabled", label: "Habilitar SIP Media Bridge", type: "checkbox" },
+        { key: "sipBridgeAriBaseUrl", label: "Bridge ARI URL", type: "text" },
+        { key: "sipBridgeAriUsername", label: "Usuario ARI Bridge", type: "text" },
+        { key: "sipBridgeAriPassword", label: "Contraseña ARI Bridge", type: "password" },
+        { key: "sipBridgeAriAppName", label: "App Stasis Bridge", type: "text" },
+        { key: "sipBridgeDialContext", label: "Contexto Puente Issabel", type: "text" },
+        { key: "sipBridgeRtpHost", label: "Host RTP hacia Gateway", type: "text" },
+        { key: "sipBridgeWaitMs", label: "Espera Bridge (ms)", type: "number" },
+      ],
+    },
   ];
 
   let activeTab = "dashboard";
@@ -207,6 +220,18 @@
           value: data.ari.connected ? "Activo" : "Inactivo",
           sub: `Sesiones: ${data.ari.activeSessions} activas / ${data.ari.totalSessions} cache`,
           cls: data.ari.connected ? "pill-ok" : "pill-warn",
+        },
+        {
+          label: "SIP Media Bridge",
+          value: data.sipBridge?.available
+            ? "Activo"
+            : data.sipBridge?.enabled
+              ? "Reconectando"
+              : "Apagado",
+          sub: data.sipBridge?.enabled
+            ? `Bridge ${data.sipBridge.asteriskVersion ? "v" + data.sipBridge.asteriskVersion : "ARI"} · Ctx ${data.sipBridge.dialContext || "ariana-sip-bridge"}`
+            : "Modo 4B.2 opcional (<16.6)",
+          cls: data.sipBridge?.available ? "pill-ok" : data.sipBridge?.enabled ? "pill-warn" : "pill-info",
         },
         {
           label: "Cola FIFO Espera",

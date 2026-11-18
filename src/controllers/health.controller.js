@@ -1,5 +1,6 @@
 const env = require("../config/env");
 const ariService = require("../modules/ari/ari.service");
+const ariBridgeService = require("../modules/ari/ari-bridge.service");
 const pbxService = require("../modules/pbx/pbx.service");
 const { resolveGatewayCapabilities } = require("../modules/pbx/asterisk-capabilities");
 const renderHealthPage = require("../views/health-page");
@@ -9,6 +10,7 @@ function buildCapabilities() {
         ariStatus: ariService.getStatus(),
         pbxStatus: pbxService.getStatus(),
         configuredAnswerMode: env.pbxAnswerMode,
+        sipBridgeStatus: ariBridgeService.getStatus(),
     });
 }
 
@@ -19,6 +21,7 @@ function index(req, res) {
         environment: env.nodeEnv,
         capabilities: buildCapabilities(),
         ari: ariService.getStatus(),
+        sipBridge: ariBridgeService.getStatus(),
         pbx: pbxService.getStatus(),
     };
 
@@ -34,6 +37,7 @@ function health(req, res) {
         environment: env.nodeEnv,
         capabilities: buildCapabilities(),
         ari: ariService.getStatus(),
+        sipBridge: ariBridgeService.getStatus(),
         pbx: pbxService.getStatus(),
     };
 

@@ -1,12 +1,16 @@
 const crypto = require("crypto");
 const dgram = require("dgram");
+const dns = require("dns").promises;
+const net = require("net");
 
 const env = require("../../config/env");
 const ariService = require("./ari.service");
+const ariBridgeService = require("./ari-bridge.service");
 const disconnectToneDetector = require("./disconnect-tone-detector");
 const pbxService = require("../pbx/pbx.service");
 const callState = require("../pbx/call-state.service");
-const { isTerminalStatus } = require("../pbx/call-state.service");
+const { isTerminalStatus, isBridgeLegChannel } = require("../pbx/call-state.service");
+const { resolveGatewayCapabilities } = require("../pbx/asterisk-capabilities");
 const outboundCallService = require("../outbound/outbound-call.service");
 const laravelService = require("../laravel/laravel.service");
 const { CallRecording } = require("../calls/call-recording");
@@ -37,35 +41,47 @@ if (typeof pbxService.registerActiveExtensionChecker === "function") {
     });
 }
 
-ariService.onSessionEvent((session, event) => {
-    if (!["StasisEnd", "ChannelDestroyed"].includes(event.type)) {
-        return;
-    }
+function handleAriClientSessionEvent(expectedTransport) {
+    return (session, event) => {
+        if (!["StasisEnd", "ChannelDestroyed"].includes(event.type)) {
+            return;
+        }
 
-    const mediaSession = (session.linkedid && mediaSessionsByLinkedId.get(session.linkedid)) ||
-        (session.channelId && mediaSessionsById.get(session.channelId));
+        const mediaSession = (session.linkedid && mediaSessionsByLinkedId.get(session.linkedid)) ||
+            (session.channelId && mediaSessionsById.get(session.channelId));
 
-    if (!mediaSession || mediaSession.status === "closed") {
-        return;
-    }
+        if (!mediaSession || mediaSession.status === "closed") {
+            return;
+        }
 
-    const eventChannelId = String(event.channel?.id || session.channelId || "");
-    if (eventChannelId && mediaSession.externalChannelId && eventChannelId === String(mediaSession.externalChannelId)) {
-        return;
-    }
-    if (eventChannelId && mediaSession.channelId && eventChannelId !== String(mediaSession.channelId)) {
-        return;
-    }
+        if (expectedTransport && (mediaSession.transport || "ari_media") !== expectedTransport) {
+            return;
+        }
 
-    setImmediate(() => {
-        closeMediaSession(mediaSession.id, "ari_channel_ended").catch((error) => {
-            console.warn("[ari:media] auto close failed", {
-                linkedid: mediaSession.linkedid,
-                message: error.message,
+        const eventChannelId = String(event.channel?.id || session.channelId || "");
+        if (eventChannelId && mediaSession.externalChannelId && eventChannelId === String(mediaSession.externalChannelId)) {
+            return;
+        }
+        if (eventChannelId && mediaSession.channelId && eventChannelId !== String(mediaSession.channelId)) {
+            return;
+        }
+
+        const closeReason = expectedTransport === "sip_bridge" ? "bridge_channel_ended" : "ari_channel_ended";
+
+        setImmediate(() => {
+            closeMediaSession(mediaSession.id, closeReason).catch((error) => {
+                console.warn("[ari:media] auto close failed", {
+                    linkedid: mediaSession.linkedid,
+                    transport: mediaSession.transport || "ari_media",
+                    message: error.message,
+                });
             });
         });
-    });
-});
+    };
+}
+
+ariService.onSessionEvent(handleAriClientSessionEvent("ari_media"));
+ariBridgeService.onSessionEvent(handleAriClientSessionEvent("sip_bridge"));
 
 if (typeof pbxService.onRedirectStasisEarlyEnd === "function") {
     pbxService.onRedirectStasisEarlyEnd((event) => {
@@ -100,14 +116,29 @@ if (typeof pbxService.onManagerEvent === "function") {
 
             if (mediaSession && mediaSession.status !== "closed") {
                 const channel = String(event.channel || "");
-                if (channel.startsWith("UnicastRTP/") || (mediaSession.externalChannelId && channel === String(mediaSession.externalChannelId))) {
+                if (
+                    channel.startsWith("UnicastRTP/") ||
+                    isBridgeLegChannel(channel) ||
+                    channel.toLowerCase().includes("@ariana-web-agent") ||
+                    (mediaSession.externalChannelId && channel === String(mediaSession.externalChannelId))
+                ) {
                     return;
                 }
-                if (mediaSession.channelId && channel && channel !== String(mediaSession.channelId)) {
-                    return;
-                }
-                if (eventName === "bridgeleave" && mediaSession.status === "agent_waiting") {
-                    return;
+
+                if ((mediaSession.transport || "ari_media") === "sip_bridge") {
+                    if (eventName !== "hangup") {
+                        return;
+                    }
+                    if (mediaSession.pbxChannel && channel && channel !== String(mediaSession.pbxChannel)) {
+                        return;
+                    }
+                } else {
+                    if (mediaSession.channelId && channel && channel !== String(mediaSession.channelId)) {
+                        return;
+                    }
+                    if (eventName === "bridgeleave" && mediaSession.status === "agent_waiting") {
+                        return;
+                    }
                 }
 
                 setImmediate(() => {
@@ -121,6 +152,60 @@ if (typeof pbxService.onManagerEvent === "function") {
             }
         }
     });
+}
+
+function resolveMediaTransport(options = {}) {
+    const requested = String(options.transport || "").trim().toLowerCase();
+    if (requested === "sip_bridge" || requested === "ari_media") {
+        return requested;
+    }
+
+    const ariStatus = typeof ariService.getStatus === "function" ? ariService.getStatus() : {};
+    const pbxStatus = typeof pbxService.getStatus === "function" ? pbxService.getStatus() : {};
+    const sipBridgeStatus = typeof ariBridgeService.getStatus === "function" ? ariBridgeService.getStatus() : {};
+
+    const capabilities = resolveGatewayCapabilities({
+        ariStatus,
+        pbxStatus,
+        configuredAnswerMode: env.pbxAnswerMode,
+        sipBridgeStatus,
+    });
+
+    if (capabilities.effectiveAnswerMode === "sip_bridge") {
+        return "sip_bridge";
+    }
+
+    if (capabilities.supportsExternalMedia === false && capabilities.sipBridgeAvailable) {
+        return "sip_bridge";
+    }
+
+    if (capabilities.supportsExternalMedia === false && env.sipBridgeEnabled) {
+        return "sip_bridge";
+    }
+
+    return "ari_media";
+}
+
+async function resolveRtpTargetHost(rawHost) {
+    const host = String(rawHost || "").trim();
+    if (!host) {
+        return "127.0.0.1";
+    }
+    if (net.isIPv4(host)) {
+        return host;
+    }
+    try {
+        const result = await dns.lookup(host, { family: 4 });
+        if (result?.address && net.isIPv4(result.address)) {
+            return result.address;
+        }
+    } catch (error) {
+        console.warn("[ari:media] DNS IPv4 lookup failed for RTP host; using raw value", {
+            host,
+            message: error.message,
+        });
+    }
+    return host;
 }
 
 async function startMediaSessionByLinkedId(linkedid, options = {}) {
@@ -176,23 +261,57 @@ async function startMediaSessionByLinkedId(linkedid, options = {}) {
         Boolean(outboundKey) ||
         (typeof outboundCallService?.isOutboundLinkedId === "function" && outboundCallService.isOutboundLinkedId(targetLinkedid));
 
+    const transport = isOutbound ? "ari_media" : resolveMediaTransport(options);
+    const useSipBridge = transport === "sip_bridge";
+    const targetAriClient = useSipBridge ? ariBridgeService : ariService;
+    const targetAppName = useSipBridge ? (env.sipBridgeAriAppName || "ariana-bridge") : env.ariAppName;
+
+    if (useSipBridge && typeof ariBridgeService.isAvailable === "function" && !ariBridgeService.isAvailable()) {
+        const bridgeStatus = ariBridgeService.getStatus();
+        const error = new Error(
+            bridgeStatus.enabled
+                ? `SIP Media Bridge ARI no esta conectado en ${bridgeStatus.baseUrl || env.sipBridgeAriBaseUrl} (${bridgeStatus.lastError || "esperando WebSocket"}).`
+                : "Asterisk < 16.6 requiere SIP Media Bridge habilitado o atender por extension SIP (MicroSIP)."
+        );
+        error.status = bridgeStatus.enabled ? 503 : 422;
+        throw error;
+    }
+
     if (!isOutbound) {
-        registerPbxAliasesForCall(targetLinkedid);
+        registerPbxAliasesForCall(targetLinkedid, null, targetAriClient);
     }
 
-    let baseSession = ariService.getSessionByLinkedId(targetLinkedid);
+    let bridgeToken = null;
+    let redirectedPbxChannel = null;
+    let baseSession = targetAriClient.getSessionByLinkedId(targetLinkedid);
     if (!baseSession && outboundKey) {
-        baseSession = ariService.getSessionByLinkedId(outboundKey);
+        baseSession = targetAriClient.getSessionByLinkedId(outboundKey);
     }
 
-    if ((!baseSession || !baseSession.inStasis) && env.ariStasisRedirectEnabled && !isOutbound) {
+    if (useSipBridge && (!baseSession || !baseSession.inStasis)) {
+        bridgeToken = ariBridgeService.registerBridgeToken(targetLinkedid, {
+            agentId: options.agentId || null,
+        });
+        console.log("[ari:media] redirecting call via SIP Media Bridge", {
+            targetLinkedid,
+            bridgeToken,
+            dialContext: env.sipBridgeDialContext,
+        });
+        redirectedPbxChannel = await redirectTrackedCallToSipBridge(targetLinkedid, bridgeToken);
+        baseSession = await waitForAriSession(
+            targetLinkedid,
+            env.sipBridgeWaitMs || env.ariStasisWaitMs,
+            [bridgeToken, outboundKey, redirectedPbxChannel],
+            targetAriClient
+        );
+    } else if ((!baseSession || !baseSession.inStasis) && env.ariStasisRedirectEnabled && !isOutbound) {
         console.log("[ari:media] redirecting call to Stasis", {
             targetLinkedid,
             hasSession: Boolean(baseSession),
             inStasis: Boolean(baseSession?.inStasis),
         });
-        const redirectedChannel = await redirectTrackedCallToStasis(targetLinkedid);
-        baseSession = await waitForAriSession(targetLinkedid, env.ariStasisWaitMs, [outboundKey, redirectedChannel]);
+        redirectedPbxChannel = await redirectTrackedCallToStasis(targetLinkedid);
+        baseSession = await waitForAriSession(targetLinkedid, env.ariStasisWaitMs, [outboundKey, redirectedPbxChannel], targetAriClient);
     } else if (isOutbound && (!baseSession || !baseSession.inStasis)) {
         console.log("[ari:media] waiting for outbound call to enter Stasis without redirect", {
             targetLinkedid,
@@ -200,33 +319,52 @@ async function startMediaSessionByLinkedId(linkedid, options = {}) {
             hasSession: Boolean(baseSession),
             inStasis: Boolean(baseSession?.inStasis),
         });
-        baseSession = await waitForAriSession(targetLinkedid, env.ariStasisWaitMs, outboundKey);
+        baseSession = await waitForAriSession(targetLinkedid, env.ariStasisWaitMs, outboundKey, targetAriClient);
     }
 
     if (!baseSession) {
+        if (bridgeToken) {
+            ariBridgeService.releaseBridgeToken(bridgeToken);
+        }
         const error = new Error("ARI session not found for linkedid: " + targetLinkedid);
         error.status = 404;
         throw error;
     }
 
     if (!baseSession.inStasis) {
+        if (bridgeToken) {
+            ariBridgeService.releaseBridgeToken(bridgeToken);
+        }
         const error = new Error(
-            `El canal (${baseSession.channelId || targetLinkedid}) no ingresó a Stasis. Verifica que el contexto [${env.ariStasisContext}] esté configurado en extensions_custom.conf de Asterisk.`
+            useSipBridge
+                ? `El puente SIP no entro en Stasis(${targetAppName}) para ${targetLinkedid}. Verifica el trunk SIP [ariana-bridge-sip] y contexto [${env.sipBridgeDialContext}] en Issabel.`
+                : `El canal (${baseSession.channelId || targetLinkedid}) no ingresó a Stasis. Verifica que el contexto [${env.ariStasisContext}] esté configurado en extensions_custom.conf de Asterisk.`
         );
         error.status = 422;
         throw error;
     }
 
     if (!baseSession.answeredAt && !["answered", "bridged"].includes(baseSession.status)) {
-        await ariService.answerCallByLinkedId(targetLinkedid);
-        if (typeof ariService.stopMoh === "function") {
-            await ariService.stopMoh(targetLinkedid).catch(() => {});
+        await targetAriClient.answerCallByLinkedId(targetLinkedid);
+        if (typeof targetAriClient.stopMoh === "function") {
+            await targetAriClient.stopMoh(targetLinkedid).catch(() => {});
         }
     }
 
-    const bridgedSession = await ariService.ensureCallBridgeByLinkedId(targetLinkedid);
+    const bridgedSession = await targetAriClient.ensureCallBridgeByLinkedId(targetLinkedid);
+    const resolvedRtpHost = useSipBridge
+        ? await resolveRtpTargetHost(env.sipBridgeRtpHost || "api")
+        : env.ariExternalMediaHost;
 
-    const mediaSession = createMediaSession(targetLinkedid, bridgedSession, options);
+    const mediaSession = createMediaSession(targetLinkedid, bridgedSession, {
+        ...options,
+        transport,
+        ariClient: targetAriClient,
+        ariAppName: targetAppName,
+        bridgeToken,
+        pbxChannel: redirectedPbxChannel,
+        rtpHost: resolvedRtpHost,
+    });
     mediaSessionsById.set(mediaSession.id, mediaSession);
 
     const aliases = new Set([targetLinkedid]);
@@ -315,6 +453,10 @@ function isLikelyCallerChannelName(channelName) {
         return false;
     }
 
+    if (isBridgeLegChannel(text) || lower.includes("@ariana-web-agent")) {
+        return false;
+    }
+
     if (lower.includes("@simulador-cola") || lower.includes("@from-pstn") || lower.includes("@from-trunk")) {
         return true;
     }
@@ -323,8 +465,9 @@ function isLikelyCallerChannelName(channelName) {
     return !/^(?:Local|SIP|PJSIP|IAX2)\/\d{2,5}[@\-]/i.test(text);
 }
 
-function registerPbxAliasesForCall(targetLinkedid, extraChannel = null) {
-    if (typeof ariService.registerLinkedIdAlias !== "function") {
+function registerPbxAliasesForCall(targetLinkedid, extraChannel = null, ariClient = ariService) {
+    const targetClient = ariClient || ariService;
+    if (typeof targetClient.registerLinkedIdAlias !== "function") {
         return [];
     }
 
@@ -363,7 +506,7 @@ function registerPbxAliasesForCall(targetLinkedid, extraChannel = null) {
 
     for (const key of keys) {
         if (key && key !== targetLinkedid) {
-            ariService.registerLinkedIdAlias(key, targetLinkedid);
+            targetClient.registerLinkedIdAlias(key, targetLinkedid);
         }
     }
 
@@ -371,13 +514,13 @@ function registerPbxAliasesForCall(targetLinkedid, extraChannel = null) {
 }
 
 async function redirectTrackedCallToStasis(linkedid) {
-    registerPbxAliasesForCall(linkedid);
+    registerPbxAliasesForCall(linkedid, null, ariService);
     callState.markStasisRedirectPending(linkedid, Math.max(7000, Number(env.ariStasisWaitMs || 5000) + 2500));
     try {
         const result = await pbxService.redirectCallToStasis(linkedid);
         const redirectedChannel = result?.channel ? String(result.channel).trim() : null;
         if (redirectedChannel) {
-            registerPbxAliasesForCall(linkedid, redirectedChannel);
+            registerPbxAliasesForCall(linkedid, redirectedChannel, ariService);
         }
         return redirectedChannel;
     } catch (error) {
@@ -390,7 +533,29 @@ async function redirectTrackedCallToStasis(linkedid) {
     }
 }
 
-async function waitForAriSession(linkedid, timeoutMs, fallbackKeys = null) {
+async function redirectTrackedCallToSipBridge(linkedid, bridgeToken) {
+    registerPbxAliasesForCall(linkedid, null, ariBridgeService);
+    callState.markStasisRedirectPending(linkedid, Math.max(7000, Number(env.sipBridgeWaitMs || env.ariStasisWaitMs || 5000) + 2500));
+    try {
+        const result = await pbxService.redirectCallToBridge(linkedid, bridgeToken, env.sipBridgeDialContext);
+        const redirectedChannel = result?.channel ? String(result.channel).trim() : null;
+        if (redirectedChannel) {
+            registerPbxAliasesForCall(linkedid, redirectedChannel, ariBridgeService);
+        }
+        return redirectedChannel;
+    } catch (error) {
+        callState.clearStasisRedirectPending(linkedid);
+        console.warn("[ari:media] redirect to SIP bridge failed", {
+            linkedid,
+            bridgeToken,
+            message: error.message,
+        });
+        return null;
+    }
+}
+
+async function waitForAriSession(linkedid, timeoutMs, fallbackKeys = null, ariClient = ariService) {
+    const targetClient = ariClient || ariService;
     const startedAt = Date.now();
     const maxWait = Math.max(0, Number(timeoutMs || 0));
     const keys = [
@@ -402,7 +567,7 @@ async function waitForAriSession(linkedid, timeoutMs, fallbackKeys = null) {
 
     const findMatchingSession = () => {
         for (const key of keys) {
-            const candidate = ariService.getSessionByLinkedId(key);
+            const candidate = targetClient.getSessionByLinkedId(key);
             if (candidate && candidate.inStasis) {
                 return candidate;
             }
@@ -481,16 +646,41 @@ async function closeMediaSession(idOrLinkedid, reason = "closed") {
     session.rtpNextSendAt = 0;
     session.rtpSendQueue = [];
 
+    const ariClient = session.ariClient || ariService;
+
     if (session.externalChannelId) {
-        await ariService.ariRequest("delete", `/channels/${encodeURIComponent(session.externalChannelId)}`)
+        await ariClient.ariRequest("delete", `/channels/${encodeURIComponent(session.externalChannelId)}`)
             .catch((error) => {
                 console.warn("[ari:media] external media hangup failed", {
                     linkedid: session.linkedid,
+                    transport: session.transport || "ari_media",
                     externalChannelId: session.externalChannelId,
                     message: error.message,
                     status: error.response?.status,
                 });
             });
+    }
+
+    if (session.bridgeToken) {
+        ariBridgeService.releaseBridgeToken(session.bridgeToken);
+    }
+
+    if (
+        (session.transport || "ari_media") === "sip_bridge" &&
+        reason !== "bridge_channel_ended" &&
+        reason !== "transfer_in_progress" &&
+        session.channelId &&
+        typeof ariClient.hangupSession === "function"
+    ) {
+        await ariClient.hangupSession(session.channelId, "normal").catch((error) => {
+            if (error.response?.status !== 404) {
+                console.warn("[ari:media] sip bridge leg hangup failed", {
+                    linkedid: session.linkedid,
+                    channelId: session.channelId,
+                    message: error.message,
+                });
+            }
+        });
     }
 
     if (session.recording) {
@@ -801,6 +991,11 @@ function createMediaSession(linkedid, ariSession, options = {}) {
     return {
         id,
         linkedid,
+        transport: options.transport || "ari_media",
+        ariClient: options.ariClient || ariService,
+        ariAppName: options.ariAppName || env.ariAppName,
+        bridgeToken: options.bridgeToken || null,
+        pbxChannel: options.pbxChannel || null,
         owner: options.owner || "agent",
         channelId: ariSession.channelId,
         bridgeId: ariSession.bridgeId,
@@ -811,7 +1006,7 @@ function createMediaSession(linkedid, ariSession, options = {}) {
         closeReason: null,
         externalChannelId: null,
         rtpSocket: null,
-        rtpHost: env.ariExternalMediaHost,
+        rtpHost: options.rtpHost || env.ariExternalMediaHost,
         rtpBindHost: env.ariExternalMediaBindHost,
         rtpPort: null,
         remoteRtp: null,
@@ -961,8 +1156,9 @@ function bindUdpPort(session) {
 }
 
 async function createExternalMediaChannel(session) {
-    const ariStatus = typeof ariService.getStatus === "function" ? ariService.getStatus() : {};
-    if (ariStatus.supportsExternalMedia === false) {
+    const ariClient = session.ariClient || ariService;
+    const ariStatus = typeof ariClient.getStatus === "function" ? ariClient.getStatus() : {};
+    if ((session.transport || "ari_media") === "ari_media" && ariStatus.supportsExternalMedia === false) {
         const error = new Error(
             `Asterisk ${ariStatus.asteriskVersion || "< 16.6"} no soporta ARI /channels/externalMedia (requiere >= 16.6). Configura pbxAnswerMode=extension o sip_bridge.`
         );
@@ -970,9 +1166,9 @@ async function createExternalMediaChannel(session) {
         throw error;
     }
 
-    const response = await ariService.ariRequest("post", "/channels/externalMedia", {
+    const response = await ariClient.ariRequest("post", "/channels/externalMedia", {
         params: {
-            app: env.ariAppName,
+            app: session.ariAppName || env.ariAppName,
             external_host: `${session.rtpHost}:${session.rtpPort}`,
             format: env.ariExternalMediaFormat,
             encapsulation: "rtp",
@@ -990,16 +1186,17 @@ async function createExternalMediaChannel(session) {
         throw error;
     }
 
-    await resolveAsteriskRtpDestination(session).catch((error) => {
+    await resolveAsteriskRtpDestination(session, ariClient.ariRequest).catch((error) => {
         session.lastError = error.message;
         console.warn("[ari:media] Asterisk RTP destination not available; waiting for inbound RTP", {
             linkedid: session.linkedid,
+            transport: session.transport || "ari_media",
             externalChannelId: session.externalChannelId,
             message: error.message,
         });
     });
 
-    await ariService.ariRequest("post", `/bridges/${encodeURIComponent(session.bridgeId)}/addChannel`, {
+    await ariClient.ariRequest("post", `/bridges/${encodeURIComponent(session.bridgeId)}/addChannel`, {
         params: {
             channel: session.externalChannelId,
         },
@@ -1007,6 +1204,7 @@ async function createExternalMediaChannel(session) {
 
     console.log("[ari:media] external media ready", {
         linkedid: session.linkedid,
+        transport: session.transport || "ari_media",
         bridgeId: session.bridgeId,
         externalChannelId: session.externalChannelId,
         externalHost: `${session.rtpHost}:${session.rtpPort}`,
@@ -1335,6 +1533,8 @@ function snapshotMediaSession(session) {
     return {
         id: session.id,
         linkedid: session.linkedid,
+        transport: session.transport || "ari_media",
+        ariAppName: session.ariAppName || env.ariAppName,
         owner: session.owner,
         channelId: session.channelId,
         bridgeId: session.bridgeId,

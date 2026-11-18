@@ -220,6 +220,16 @@ const env = {
     ariExternalMediaPayloadType: toNumber(process.env.ARI_EXTERNAL_MEDIA_PAYLOAD_TYPE, 0),
     ariExternalMediaFrameMs: toNumber(process.env.ARI_EXTERNAL_MEDIA_FRAME_MS, 20),
     ariExternalMediaMaxQueueMs: toNumber(process.env.ARI_EXTERNAL_MEDIA_MAX_QUEUE_MS, 200),
+
+    // Headless Asterisk SIP Media Bridge (Fase 4B.2 para PBX Asterisk < 16.6)
+    sipBridgeEnabled: toBoolean(process.env.SIP_BRIDGE_ENABLED, false),
+    sipBridgeAriBaseUrl: process.env.SIP_BRIDGE_ARI_BASE_URL || "http://asterisk-media-bridge:8088",
+    sipBridgeAriUsername: process.env.SIP_BRIDGE_ARI_USERNAME || "ariana_bridge",
+    sipBridgeAriPassword: process.env.SIP_BRIDGE_ARI_PASSWORD || "",
+    sipBridgeAriAppName: process.env.SIP_BRIDGE_ARI_APP_NAME || "ariana-bridge",
+    sipBridgeDialContext: process.env.SIP_BRIDGE_DIAL_CONTEXT || "ariana-sip-bridge",
+    sipBridgeRtpHost: process.env.SIP_BRIDGE_RTP_HOST || "api",
+    sipBridgeWaitMs: toNumber(process.env.SIP_BRIDGE_WAIT_MS, 7000),
 };
 
 module.exports = env;

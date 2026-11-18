@@ -83,16 +83,50 @@ write = system,call,log,verbose,command,agent,user,config,originate,reporting
    * `eventwhencalled=yes`
    * Timeout de cola holgado (ej. `180`–`300` s o música en espera sin cortar a los 30 s) y enrutar hacia esa cola **únicamente un DID de pruebas o una opción oculta de IVR** (tráfico bajo).
 
-3. **Bloque E (Solo si operará Plan A `sip_bridge` en navegador sobre Issabel `13.30.0`):** habilitar 1 peer/troncal SIP interno sin salida externa apuntando a `IP_LAN_GATEWAY` (códecs `ulaw,alaw`, `nat=no`, `qualify=yes`) y su contexto de puente local según guía de Fase 4B.2. *(No requerido si se opera Plan B con MicroSIP/Zoiper/Teléfono IP).*
+3. **Bloque E (Solo si operará Plan A `sip_bridge` en navegador sobre Issabel `13.30.0`):** agregar el troncal SIP interno en `/etc/asterisk/sip_custom.conf` y el contexto de puente/timbrado web en `/etc/asterisk/extensions_custom.conf` *(No requerido si se opera Plan B con MicroSIP/Zoiper/Teléfono IP)*:
+
+   En `/etc/asterisk/sip_custom.conf` *(reemplazar `IP_LAN_GATEWAY` por la IP fija del servidor Docker gateway en la LAN)*:
+   ```ini
+   [ariana-bridge-sip]
+   type=peer
+   host=IP_LAN_GATEWAY
+   port=5080
+   context=ariana-sip-bridge
+   disallow=all
+   allow=ulaw
+   allow=alaw
+   qualify=yes
+   insecure=port,invite
+   canreinvite=no
+   directmedia=no
+   nat=no
+   ```
+
+   En `/etc/asterisk/extensions_custom.conf`:
+   ```ini
+   [ariana-sip-bridge]
+   exten => _X.,1,NoOp(Ariana SIP Media Bridge ${CALLERID(num)} -> ${EXTEN})
+    same => n,Dial(SIP/ariana-bridge-sip/${EXTEN},60)
+    same => n,Hangup()
+
+   [ariana-web-agent]
+   exten => _X.,1,NoOp(Ariana Web Agent Ring ext ${EXTEN} caller ${CALLERID(num)})
+    same => n,Ringing()
+    same => n,Wait(25)
+    same => n,Hangup()
+   ```
+   *(Para timbrar en EVA sin softphone instalado, registrar miembro en cola como `Local/101@ariana-web-agent/n,0,Nombre Agente` o mantener `SIP/101` en modo Mixto).*
 
 4. Recargar módulos en Issabel **sin cortar llamadas activas**:
    ```bash
    asterisk -rx "module reload manager"
    asterisk -rx "module reload res_ari.so"
+   asterisk -rx "sip reload"
    asterisk -rx "dialplan reload"
    asterisk -rx "queue reload all"
    asterisk -rx "http show status"
    asterisk -rx "ari show status"
+   asterisk -rx "sip show peer ariana-bridge-sip"
    ```
 
 ---

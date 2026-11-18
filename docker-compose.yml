@@ -27,6 +27,35 @@ services:
     networks:
       - ariana-asterisk-network
 
+  asterisk-media-bridge:
+    build:
+      context: ./asterisk-bridge
+      dockerfile: Dockerfile
+    container_name: ariana-asterisk-media-bridge
+    restart: unless-stopped
+    ports:
+      - "${SIP_BRIDGE_SIP_PORT:-5080}:${SIP_BRIDGE_SIP_PORT:-5080}/udp"
+      - "${SIP_BRIDGE_SIP_PORT:-5080}:${SIP_BRIDGE_SIP_PORT:-5080}/tcp"
+      - "${SIP_BRIDGE_RTP_START:-18000}-${SIP_BRIDGE_RTP_END:-18060}:${SIP_BRIDGE_RTP_START:-18000}-${SIP_BRIDGE_RTP_END:-18060}/udp"
+    env_file:
+      - .env
+    environment:
+      - SIP_BRIDGE_SIP_PORT=${SIP_BRIDGE_SIP_PORT:-5080}
+      - SIP_BRIDGE_RTP_START=${SIP_BRIDGE_RTP_START:-18000}
+      - SIP_BRIDGE_RTP_END=${SIP_BRIDGE_RTP_END:-18060}
+      - SIP_BRIDGE_ARI_PORT=8088
+      - SIP_BRIDGE_ARI_USERNAME=${SIP_BRIDGE_ARI_USERNAME:-ariana_bridge}
+      - SIP_BRIDGE_ARI_PASSWORD=${SIP_BRIDGE_ARI_PASSWORD:-ariana_bridge_local}
+      - SIP_BRIDGE_ARI_APP_NAME=${SIP_BRIDGE_ARI_APP_NAME:-ariana-bridge}
+      - SIP_BRIDGE_PUBLIC_IP=${SIP_BRIDGE_PUBLIC_IP:-}
+    healthcheck:
+      test: ["CMD-SHELL", "asterisk -rx 'core show uptime' >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks:
+      - ariana-asterisk-network
+
 networks:
   ariana-asterisk-network:
     driver: bridge

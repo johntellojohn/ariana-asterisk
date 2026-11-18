@@ -11,6 +11,7 @@ const pbxService = require("../pbx/pbx.service");
 const callState = require("../pbx/call-state.service");
 const { resolveGatewayCapabilities } = require("../pbx/asterisk-capabilities");
 const ariService = require("../ari/ari.service");
+const ariBridgeService = require("../ari/ari-bridge.service");
 const ariMediaService = require("../ari/ari-media.service");
 
 const ASSETS_DIR = path.join(__dirname, "assets");
@@ -337,10 +338,12 @@ function computeSecondsBetween(startIso, endIso) {
 async function getOverviewApi(req, res) {
     const pbxStatus = pbxService.getStatus();
     const ariStatus = ariService.getStatus();
+    const sipBridgeStatus = ariBridgeService.getStatus();
     const capabilities = resolveGatewayCapabilities({
         ariStatus,
         pbxStatus,
         configuredAnswerMode: env.pbxAnswerMode,
+        sipBridgeStatus,
     });
 
     const forceRefreshQueue = String(req.query?.refreshQueue || "") === "1";
@@ -427,6 +430,7 @@ async function getOverviewApi(req, res) {
         capabilities,
         ami: pbxStatus,
         ari: ariStatus,
+        sipBridge: sipBridgeStatus,
         rtp: ariMediaService.getMediaStats(),
         outbox: webhookDispatcher.getStats(),
         heartbeat: heartbeatService.getStatus(),
@@ -498,7 +502,7 @@ function getConfigApi(_req, res) {
 
 async function updateConfigApi(req, res) {
     const result = await configStore.updateConfig(req.body || {});
-    const reconnected = { ami: false, ari: false };
+    const reconnected = { ami: false, ari: false, sipBridge: false };
 
     if (result.amiChanged || (env.pbxAmiEnabled && !pbxService.getStatus().connected && configStore.isAmiReady())) {
         if (configStore.isAmiReady()) {
@@ -518,7 +522,16 @@ async function updateConfigApi(req, res) {
         }
     }
 
-    if (result.changedKeys.includes("pbxAnswerMode")) {
+    if (result.bridgeChanged || (env.sipBridgeEnabled && !ariBridgeService.getStatus().connected && configStore.isSipBridgeReady())) {
+        if (configStore.isSipBridgeReady()) {
+            ariBridgeService.restart();
+            reconnected.sipBridge = true;
+        } else {
+            ariBridgeService.stop();
+        }
+    }
+
+    if (result.changedKeys.includes("pbxAnswerMode") || result.bridgeChanged) {
         heartbeatService.sendOnce().catch(() => {});
     }
 
@@ -618,6 +631,7 @@ async function runDiagnosticsApi(req, res) {
                 },
                 pbxStatus: pbxService.getStatus(),
                 configuredAnswerMode: env.pbxAnswerMode,
+                sipBridgeStatus: ariBridgeService.getStatus(),
             });
             const extMediaTxt =
                 caps.supportsExternalMedia === true
@@ -668,6 +682,45 @@ async function runDiagnosticsApi(req, res) {
         status: diskWritable && outboxStats.pendingCount === 0 ? "ok" : diskWritable ? "warn" : "fail",
         detail: `./data escribible: ${diskWritable ? "Sí" : "No"} | Outbox pendiente: ${outboxStats.pendingCount} | Sesiones RTP activas: ${rtpStats.activeCount}`,
     });
+
+    // 6. SIP Media Bridge (Asterisk < 16.6 browser audio)
+    const bridgeStatus = ariBridgeService.getStatus();
+    if (!env.sipBridgeEnabled) {
+        const legacyCaps = resolveGatewayCapabilities({
+            ariStatus: ariService.getStatus(),
+            pbxStatus: pbxService.getStatus(),
+            configuredAnswerMode: env.pbxAnswerMode,
+            sipBridgeStatus: bridgeStatus,
+        });
+        checks.push({
+            id: "sip_bridge",
+            title: "SIP Media Bridge (Audio Navegador < 16.6)",
+            status: legacyCaps.supportsExternalMedia === true ? "ok" : "warn",
+            detail:
+                legacyCaps.supportsExternalMedia === true
+                    ? "Deshabilitado (no requerido en Asterisk >= 16.6)."
+                    : "Deshabilitado. Habilita sipBridgeEnabled y levanta asterisk-media-bridge para audio en navegador sobre Asterisk 13.x.",
+        });
+    } else {
+        try {
+            await ariBridgeService.probeAsteriskInfo().catch(() => {});
+            const bridgeInfo = await ariBridgeService.ariRequest("GET", "/asterisk/info");
+            const latestBridge = ariBridgeService.getStatus();
+            checks.push({
+                id: "sip_bridge",
+                title: "SIP Media Bridge (Audio Navegador < 16.6)",
+                status: latestBridge.connected ? "ok" : "warn",
+                detail: `REST OK (Asterisk ${bridgeInfo?.data?.system?.version || latestBridge.asteriskVersion || "?"}) | WebSocket: ${latestBridge.connected ? "conectado" : "desconectado"} | Contexto Issabel: ${env.sipBridgeDialContext} | RTP Host: ${env.sipBridgeRtpHost}`,
+            });
+        } catch (error) {
+            checks.push({
+                id: "sip_bridge",
+                title: "SIP Media Bridge (Audio Navegador < 16.6)",
+                status: "fail",
+                detail: `Error SIP Bridge ARI (${env.sipBridgeAriBaseUrl}): ${error.message}`,
+            });
+        }
+    }
 
     return res.json({
         ok: true,

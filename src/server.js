@@ -6,6 +6,7 @@ const auditLog = require("./modules/audit/audit-log.service");
 const heartbeatService = require("./modules/audit/heartbeat.service");
 const webhookDispatcher = require("./modules/laravel/webhook-dispatcher.service");
 const ariService = require("./modules/ari/ari.service");
+const ariBridgeService = require("./modules/ari/ari-bridge.service");
 const { attachAriWebSocketServer } = require("./modules/ari/ari.websocket");
 const { attachMobileWebSocketServer } = require("./modules/mobile/mobile.websocket");
 const pbxService = require("./modules/pbx/pbx.service");
@@ -59,6 +60,7 @@ async function bootstrap() {
                 ariStatus,
                 pbxStatus,
                 configuredAnswerMode: env.pbxAnswerMode,
+                sipBridgeStatus: ariBridgeService.getStatus(),
             });
             return {
                 gateway_version: env.buildVersion,
@@ -66,6 +68,7 @@ async function bootstrap() {
                 configured: configStore.isConfigured(),
                 ami_connected: Boolean(pbxStatus.connected),
                 ari_connected: Boolean(ariStatus.connected),
+                sip_bridge_available: Boolean(capabilities.sipBridgeAvailable),
                 active_calls_count: Number(pbxStatus.activeCallsCount || 0),
                 outbox_pending_count: Number(outboxStats.pendingCount || 0),
                 outbox_online: Boolean(outboxStats.online),
@@ -109,6 +112,12 @@ async function bootstrap() {
         });
     }
 
+    if (configStore.isSipBridgeReady()) {
+        ariBridgeService.start();
+    } else if (env.sipBridgeEnabled) {
+        console.warn("[Bootstrap] SIP Media Bridge habilitado pero falta configuracion ARI local.");
+    }
+
     attachAriWebSocketServer(server);
     attachMobileWebSocketServer(server);
     heartbeatService.start(env.laravelHeartbeatIntervalMs);
@@ -130,6 +139,7 @@ function shutdown(signal) {
         auditLog.stop();
         pbxService.stop();
         ariService.stop();
+        ariBridgeService.stop();
         if (!server) {
             process.exit(0);
             return;

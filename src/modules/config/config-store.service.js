@@ -70,6 +70,16 @@ const CONFIG_FIELDS = [
     { key: "ariExternalMediaPortStart", type: "number", secret: false, min: 1024, max: 65534 },
     { key: "ariExternalMediaPortEnd", type: "number", secret: false, min: 1025, max: 65535 },
 
+    // SIP Media Bridge (Fase 4B.2)
+    { key: "sipBridgeEnabled", type: "boolean", secret: false },
+    { key: "sipBridgeAriBaseUrl", type: "string", secret: false },
+    { key: "sipBridgeAriUsername", type: "string", secret: false },
+    { key: "sipBridgeAriPassword", type: "string", secret: true },
+    { key: "sipBridgeAriAppName", type: "string", secret: false },
+    { key: "sipBridgeDialContext", type: "string", secret: false },
+    { key: "sipBridgeRtpHost", type: "string", secret: false },
+    { key: "sipBridgeWaitMs", type: "number", secret: false, min: 1000, max: 30000 },
+
     // AI / Audio
     { key: "trunkAiEnabled", type: "boolean", secret: false },
     { key: "openaiApiKey", type: "string", secret: true },
@@ -384,6 +394,15 @@ class ConfigStoreService {
         );
     }
 
+    isSipBridgeReady() {
+        return Boolean(
+            this.config.sipBridgeEnabled &&
+            this.config.sipBridgeAriBaseUrl &&
+            this.config.sipBridgeAriUsername &&
+            this.config.sipBridgeAriPassword
+        );
+    }
+
     applyToEnv(targetEnv = this.targetEnv) {
         if (!targetEnv) {
             return;
@@ -470,12 +489,14 @@ class ConfigStoreService {
 
         const amiChanged = changedKeys.some((key) => key.startsWith("pbxAmi"));
         const ariChanged = changedKeys.some((key) => key.startsWith("ari"));
+        const bridgeChanged = changedKeys.some((key) => key.startsWith("sipBridge"));
         const evaChanged = changedKeys.some((key) => key.startsWith("laravel"));
 
         return {
             changedKeys,
             amiChanged,
             ariChanged,
+            bridgeChanged,
             evaChanged,
             status: this.getStatus(),
             config: this.getPublicConfig(),
@@ -512,6 +533,7 @@ class ConfigStoreService {
             configured: this.meta.configured,
             amiReady: this.isAmiReady(),
             ariReady: this.isAriReady(),
+            sipBridgeReady: this.isSipBridgeReady(),
             pendingReasons: [...this.meta.pendingReasons],
         };
     }

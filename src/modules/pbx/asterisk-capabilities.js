@@ -173,7 +173,8 @@ function resolveGatewayCapabilities({
     ariStatus = {},
     pbxStatus = {},
     configuredAnswerMode = "auto",
-    sipBridgeAvailable = false,
+    sipBridgeStatus = null,
+    sipBridgeAvailable = null,
 } = {}) {
     const ariRaw = ariStatus?.asteriskRawVersion || ariStatus?.asteriskVersion || null;
     const pbxRaw = pbxStatus?.asteriskRawVersion || pbxStatus?.asteriskVersion || null;
@@ -184,13 +185,17 @@ function resolveGatewayCapabilities({
         : pbxRaw
           ? pbxStatus?.asteriskDetectedAt || null
           : null;
+    const effectiveBridgeAvailable =
+        sipBridgeAvailable !== null && sipBridgeAvailable !== undefined
+            ? Boolean(sipBridgeAvailable)
+            : Boolean(sipBridgeStatus?.available || (sipBridgeStatus?.enabled && sipBridgeStatus?.connected));
 
     return buildCapabilitiesSnapshot({
         rawVersion,
         versionSource,
         detectedAt,
         configuredAnswerMode: configuredAnswerMode || pbxStatus?.configuredAnswerMode || "auto",
-        sipBridgeAvailable,
+        sipBridgeAvailable: effectiveBridgeAvailable,
     });
 }
 

@@ -4,7 +4,7 @@ const env = require("../../config/env");
 const laravelService = require("../laravel/laravel.service");
 const auditLog = require("../audit/audit-log.service");
 const callState = require("./call-state.service");
-const { classifyChannel } = require("./call-state.service");
+const { classifyChannel, isBridgeLegChannel } = require("./call-state.service");
 const queuePresence = require("./queue-presence.service");
 const { parseAsteriskVersion } = require("./asterisk-capabilities");
 
@@ -408,7 +408,9 @@ function updateCallSummary(event) {
     switch (event.event) {
         case "dialbegin":
             call.from = call.from || event.caller || "";
-            call.to = call.to || event.destination || "";
+            if (!isBridgeLegChannel(event.destChannel) && !isBridgeLegChannel(event.channel)) {
+                call.to = call.to || event.destination || "";
+            }
             break;
         case "dialend":
             if (event.dialStatus) {
@@ -813,20 +815,26 @@ async function connectCallToExtension(linkedid, extension, context = env.pbxOrig
     });
 }
 
-async function redirectCallToStasis(linkedid) {
-    validateRequired({ linkedid });
+async function redirectCallToContext(linkedid, target = {}) {
+    const context = String(target.context || "").trim();
+    const extension = String(target.extension || "").trim();
+    const priority = Number(target.priority || 1) || 1;
+    const actionPrefix = String(target.actionPrefix || "redirect_stasis").trim() || "redirect_stasis";
+    const logLabel = String(target.logLabel || "ARI Stasis").trim() || "ARI Stasis";
+
+    validateRequired({ linkedid, context, extension });
     ensureReady();
 
-    console.log("[pbx:action] redirect call to ARI Stasis requested", {
+    console.log(`[pbx:action] redirect call to ${logLabel} requested`, {
         linkedid,
-        context: env.ariStasisContext,
-        extension: env.ariStasisExtension,
-        priority: env.ariStasisPriority,
+        context,
+        extension,
+        priority,
     });
-    rememberAction(linkedid, "redirect_stasis_requested", {
-        context: env.ariStasisContext,
-        extension: env.ariStasisExtension,
-        priority: env.ariStasisPriority,
+    rememberAction(linkedid, `${actionPrefix}_requested`, {
+        context,
+        extension,
+        priority,
     });
 
     const targetLinkedid = String(linkedid || "").trim();
@@ -850,11 +858,11 @@ async function redirectCallToStasis(linkedid) {
     if (isFinalCallStatus(call.status)) {
         const primary = primaryCallChannel(call);
         if (primary && !isCallPrimaryChannelHungUp(call)) {
-            console.log("[pbx:action] call status was " + call.status + " but primary channel " + primary + " is still active; proceeding with Stasis redirect");
+            console.log(`[pbx:action] call status was ${call.status} but primary channel ${primary} is still active; proceeding with ${logLabel} redirect`);
         } else {
-            const error = new Error(`La llamada PBX ya no esta activa (${call.status}). No se puede redirigir a ARI/Stasis.`);
+            const error = new Error(`La llamada PBX ya no esta activa (${call.status}). No se puede redirigir a ${logLabel}.`);
             error.status = 409;
-            rememberAction(linkedid, "redirect_stasis_rejected_final_status", {
+            rememberAction(linkedid, `${actionPrefix}_rejected_final_status`, {
                 status: call.status,
                 result: call.result,
                 channels: call.channels,
@@ -866,54 +874,74 @@ async function redirectCallToStasis(linkedid) {
     const channel = primaryCallChannel(call);
 
     if (!channel) {
-        const error = new Error("PBX call has no tracked channel to redirect to ARI/Stasis");
+        const error = new Error(`PBX call has no tracked channel to redirect to ${logLabel}`);
         error.status = 409;
         throw error;
     }
 
     const response = await redirectChannel(channel, {
-        context: env.ariStasisContext,
-        extension: env.ariStasisExtension,
-        priority: env.ariStasisPriority,
+        context,
+        extension,
+        priority,
     });
 
     call.answered = true;
     call.status = "ANSWER";
     call.result = "answered";
 
-    rememberAction(linkedid, "redirect_stasis_sent", {
+    rememberAction(linkedid, `${actionPrefix}_sent`, {
         channel,
-        context: env.ariStasisContext,
-        extension: env.ariStasisExtension,
-        priority: env.ariStasisPriority,
+        context,
+        extension,
+        priority,
         response,
     });
 
     return {
         linkedid,
         channel,
+        context,
+        extension,
+        priority,
+        response,
+    };
+}
+
+function redirectCallToStasis(linkedid) {
+    return redirectCallToContext(linkedid, {
         context: env.ariStasisContext,
         extension: env.ariStasisExtension,
         priority: env.ariStasisPriority,
-        response,
-    };
+        actionPrefix: "redirect_stasis",
+        logLabel: "ARI Stasis",
+    });
+}
+
+function redirectCallToBridge(linkedid, bridgeToken, dialContext = env.sipBridgeDialContext) {
+    return redirectCallToContext(linkedid, {
+        context: dialContext || "ariana-sip-bridge",
+        extension: bridgeToken,
+        priority: 1,
+        actionPrefix: "redirect_stasis",
+        logLabel: "SIP Media Bridge",
+    });
 }
 
 function primaryCallChannel(call) {
     if (!call) return "";
 
-    // 1. External non-local channel (e.g. PJSIP/..., SIP/..., DAHDI/...)
+    // 1. External non-local channel (e.g. PJSIP/..., SIP/..., DAHDI/...) excluding bridge legs
     const external = (call.channels || []).find(
-        (ch) => ch && !ch.startsWith("Local/") && !ch.startsWith("UnicastRTP/")
+        (ch) => ch && !ch.startsWith("Local/") && !ch.startsWith("UnicastRTP/") && !isBridgeLegChannel(ch)
     );
     if (external) {
         return external;
     }
 
-    // 2. Non-local dialbegin channel
+    // 2. Non-local dialbegin channel excluding bridge legs
     const nonLocalDialBegin = [...call.events]
         .reverse()
-        .find((event) => event.event === "dialbegin" && event.channel && !event.channel.startsWith("Local/"));
+        .find((event) => event.event === "dialbegin" && event.channel && !event.channel.startsWith("Local/") && !isBridgeLegChannel(event.channel));
     if (nonLocalDialBegin?.channel) {
         return nonLocalDialBegin.channel;
     }
@@ -1523,7 +1551,7 @@ function isNonTerminalHangupEvent(event, call) {
         return true;
     }
 
-    if (kind === "agent_leg") {
+    if (kind === "agent_leg" || kind === "bridge_leg") {
         return true;
     }
 
@@ -2283,6 +2311,7 @@ module.exports = {
     hangupCall,
     connectCallToExtension,
     redirectCallToStasis,
+    redirectCallToBridge,
     onRedirectStasisEarlyEnd,
     onManagerEvent,
     registerEventMetadataResolver,

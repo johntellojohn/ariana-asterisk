@@ -1,4 +1,5 @@
 const ariService = require("./ari.service");
+const ariBridgeService = require("./ari-bridge.service");
 const ariMediaService = require("./ari-media.service");
 const ariAiSessionService = require("./ari-ai-session.service");
 const env = require("../../config/env");
@@ -185,17 +186,36 @@ async function hangupSession(req, res, next) {
 
 async function hangupCall(req, res, next) {
     try {
-        const session = await ariService.hangupCallByLinkedId(
-            req.params.linkedid,
-            req.body.reason || "normal"
-        );
+        const linkedid = req.params.linkedid;
+        const reason = req.body.reason || "normal";
+        const activeMedia = ariMediaService.getMediaSession(linkedid);
+        const bridgeSession = ariBridgeService.getSessionByLinkedId(linkedid);
 
-        res.json({
+        if (activeMedia?.transport === "sip_bridge" || bridgeSession) {
+            if (activeMedia) {
+                await ariMediaService.closeMediaSession(activeMedia.id, reason).catch(() => {});
+            } else if (bridgeSession) {
+                await ariBridgeService.hangupCallByLinkedId(linkedid, reason).catch(() => {});
+            }
+
+            if (typeof pbxService.hangupCall === "function") {
+                await pbxService.hangupCall(linkedid, reason).catch(() => {});
+            }
+
+            return res.json({
+                ok: true,
+                data: bridgeSession || activeMedia,
+            });
+        }
+
+        const session = await ariService.hangupCallByLinkedId(linkedid, reason);
+
+        return res.json({
             ok: true,
             data: session,
         });
     } catch (error) {
-        next(error);
+        return next(error);
     }
 }
 
