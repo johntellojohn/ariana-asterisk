@@ -173,7 +173,11 @@ function extractExtensionNumber(value) {
     }
 
     const text = String(value).trim();
-    const match = text.match(/(?:Local\/|PJSIP\/|SIP\/)?(\d{3,4})(?:@|\b)/i);
+    if (isBridgeLegChannel(text) || /^88\d{8}$/.test(text) || /^\d{6,}$/.test(text) || /^\d+\.\d+$/.test(text)) {
+        return "";
+    }
+
+    const match = text.match(/(?:Local\/|PJSIP\/|SIP\/)?(\d{2,5})(?:[@\-\/;,]|$)/i);
 
     return match ? match[1] : "";
 }
@@ -209,16 +213,18 @@ function handleManagerEvent(event) {
         event.Interface ||
         "";
     const queueName = String(event.queue || event.Queue || "").trim();
-    let agentExtension = extractExtensionNumber(agentCalledRaw);
-    if (!agentExtension && (event.destchannel || event.DestChannel)) {
-        agentExtension = extractExtensionNumber(event.destchannel || event.DestChannel);
+    const rawDestChannel = event.destchannel || event.DestChannel || "";
+    const isBridgeEvent = isBridgeLegChannel(rawDestChannel) || isBridgeLegChannel(event.channel || event.Channel || "");
+    let agentExtension = isBridgeEvent ? "" : extractExtensionNumber(agentCalledRaw);
+    if (!agentExtension && !isBridgeEvent && rawDestChannel) {
+        agentExtension = extractExtensionNumber(rawDestChannel);
     }
     const destCandidate = event.destination || event.Destination || "";
-    if (!agentExtension && destCandidate && String(destCandidate) !== queueName) {
+    if (!agentExtension && !isBridgeEvent && destCandidate && String(destCandidate) !== queueName) {
         agentExtension = extractExtensionNumber(destCandidate);
     }
     const extenCandidate = event.exten || event.Exten || "";
-    if (!agentExtension && extenCandidate && String(extenCandidate) !== queueName) {
+    if (!agentExtension && !isBridgeEvent && extenCandidate && String(extenCandidate) !== queueName) {
         agentExtension = extractExtensionNumber(extenCandidate);
     }
 
@@ -1961,32 +1967,32 @@ async function pauseQueueMember(arg1, arg2, arg3, arg4) {
         queue: queue || "all",
     });
 
-    const candidates = [
-        `Local/${cleanExt}@from-queue/n`,
-        `Local/${cleanExt}@from-queue`,
-        `Local/${cleanExt}@from-internal/n`,
-        cleanExt,
-        `PJSIP/${cleanExt}`,
-    ];
-
-    const results = [];
-    for (const iface of candidates) {
+    const targetQueue = String(queue || "650").trim();
+    if (!queuePresence.getKnownInterface(targetQueue, cleanExt)) {
         try {
-            const action = {
-                Action: "QueuePause",
-                Interface: iface,
-                Paused: pauseFlag,
-                Reason: pauseReason,
-            };
-            if (queue) {
-                action.Queue = String(queue).trim();
-            }
-            const response = await runAmiAction(action);
-            results.push({ interface: iface, ok: true, response });
-        } catch (err) {
-            results.push({ interface: iface, ok: false, error: err.message });
+            const snapshot = await getQueueStatus(targetQueue, { timeoutMs: 1200 });
+            queuePresence.recordDiscoveredMembers(targetQueue, snapshot);
+        } catch (_) {
+            // Fallback gracefully to static interface candidates
         }
     }
+
+    const result = await queuePresence.pauseMemberWithDiscovery({
+        queue: targetQueue,
+        extension: cleanExt,
+        paused: isPaused,
+        reason: pauseReason,
+        runAmiAction,
+    });
+
+    if (result.ok) {
+        const stateSig = `${isPaused ? "1" : "0"}:${pauseReason || (isPaused ? "paused_by_eva" : "online_eva")}`;
+        queuePresence.stateByKey.set(`${targetQueue}:${cleanExt}`, stateSig);
+    }
+
+    const results = result.ok
+        ? [{ interface: result.interface, ok: true, response: result.response }]
+        : (result.attempts || []).map((a) => ({ interface: a.interface, ok: false, error: a.error }));
 
     try {
         await runAmiAction({

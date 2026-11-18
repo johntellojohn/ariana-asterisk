@@ -20,11 +20,19 @@ class QueuePresenceService {
     static buildCandidateInterfaces(extension) {
         const clean = String(extension || "").trim();
         return [
+            `Local/${clean}@ariana-web-agent/n`,
             `Local/${clean}@from-queue/n`,
             `Local/${clean}@simulador-agente/n`,
-            `PJSIP/${clean}`,
             `SIP/${clean}`,
+            `PJSIP/${clean}`,
         ];
+    }
+
+    getKnownInterface(queue = "650", extension) {
+        const cleanQueue = String(queue || "650").trim();
+        const cleanExt = QueuePresenceService.extractExtension(extension);
+        if (!cleanExt) return null;
+        return this.interfaceByKey.get(`${cleanQueue}:${cleanExt}`) || null;
     }
 
     recordDiscoveredMembers(queue, amiResponse) {
@@ -45,7 +53,12 @@ class QueuePresenceService {
             const ext = QueuePresenceService.extractExtension(iface || item.name || item.Name);
 
             if (ext && iface) {
-                this.interfaceByKey.set(`${memberQueue}:${ext}`, iface);
+                const key = `${memberQueue}:${ext}`;
+                const prevIface = this.interfaceByKey.get(key);
+                if (prevIface && prevIface !== iface) {
+                    this.stateByKey.delete(key);
+                }
+                this.interfaceByKey.set(key, iface);
                 updated += 1;
             }
         }

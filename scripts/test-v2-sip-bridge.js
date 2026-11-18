@@ -6,6 +6,8 @@ const ariBridgeService = require("../src/modules/ari/ari-bridge.service");
 const ariMediaService = require("../src/modules/ari/ari-media.service");
 const pbxService = require("../src/modules/pbx/pbx.service");
 const callState = require("../src/modules/pbx/call-state.service");
+const queuePresence = require("../src/modules/pbx/queue-presence.service");
+const { QueuePresenceService } = queuePresence;
 const { CallStateService, classifyChannel } = callState;
 const { resolveGatewayCapabilities } = require("../src/modules/pbx/asterisk-capabilities");
 
@@ -157,6 +159,16 @@ async function run() {
         channel: "SIP/101-00000015",
     });
     assert.strictEqual(afterAgentNewChan.call.primaryChannel, "Local/001@simulador-cola-00000210;2");
+
+    // 2c. Regression: bridge token 88xxxxxxxx and bridge channels must NOT leak into extractExtensionNumber,
+    // and QueuePresenceService must support Local/<ext>@ariana-web-agent/n.
+    assert.strictEqual(pbxService.extractExtensionNumber("8818346149"), "");
+    assert.strictEqual(pbxService.extractExtensionNumber("SIP/ariana-bridge-sip-00000010"), "");
+    assert.strictEqual(pbxService.extractExtensionNumber("Local/150@ariana-web-agent/n"), "150");
+    assert.ok(
+        QueuePresenceService.buildCandidateInterfaces("150").includes("Local/150@ariana-web-agent/n"),
+        "QueuePresenceService must include @ariana-web-agent/n interface"
+    );
 
     // 3. Bridge token resolution inside ari-bridge.service
     ariBridgeService.__test.clearTokens();
