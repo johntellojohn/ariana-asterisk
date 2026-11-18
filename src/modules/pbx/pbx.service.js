@@ -2083,9 +2083,11 @@ async function probeAmiAsteriskVersion() {
 function collectQueueStatusFromAmi(amiClient, queue = "", timeoutMs = 2500) {
     const cleanQueue = String(queue || "").trim();
     const actionId = `qs-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const expectedActionIds = new Set([actionId]);
+    // asterisk-manager reads lowercase `action.actionid` and returns the final sent ActionID
     const action = {
         Action: "QueueStatus",
-        ActionID: actionId,
+        actionid: actionId,
         ...(cleanQueue ? { Queue: cleanQueue } : {}),
     };
 
@@ -2127,7 +2129,7 @@ function collectQueueStatusFromAmi(amiClient, queue = "", timeoutMs = 2500) {
 
         const onManagerEvent = (rawEv = {}) => {
             const evActionId = String(rawEv.actionid || rawEv.ActionID || "").trim();
-            if (evActionId !== actionId) {
+            if (!evActionId || !expectedActionIds.has(evActionId)) {
                 return;
             }
 
@@ -2228,7 +2230,7 @@ function collectQueueStatusFromAmi(amiClient, queue = "", timeoutMs = 2500) {
             finish(true);
         }, Math.max(200, Number(timeoutMs) || 2500));
 
-        amiClient.action(action, (error, response) => {
+        const sentId = amiClient.action(action, (error, response) => {
             if (error) {
                 if (!settled) {
                     settled = true;
@@ -2245,8 +2247,15 @@ function collectQueueStatusFromAmi(amiClient, queue = "", timeoutMs = 2500) {
                 }
                 return;
             }
+            if (response && (response.actionid || response.ActionID)) {
+                expectedActionIds.add(String(response.actionid || response.ActionID).trim());
+            }
             actionAck = response;
         });
+
+        if (sentId !== undefined && sentId !== null && String(sentId).trim() !== "") {
+            expectedActionIds.add(String(sentId).trim());
+        }
     });
 }
 

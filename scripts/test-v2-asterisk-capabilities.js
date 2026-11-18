@@ -81,10 +81,12 @@ async function run() {
     assert.strictEqual(gateway20.effectiveAnswerMode, "ari_media");
     assert.strictEqual(gateway20.supportsExternalMedia, true);
 
-    // 3. Multi-event AMI QueueStatus collection & compatibility with QueuePresenceService
+    // 3. Multi-event AMI QueueStatus collection matching asterisk-manager lowercase `actionid` behavior
     const fakeAmi = new EventEmitter();
     fakeAmi.action = (action, cb) => {
-        const actionid = action.ActionID;
+        // Replicate asterisk-manager/lib/ami.js: uses lowercase `action.actionid` or generates numeric id
+        const actionid = String(action.actionid || Date.now());
+        if (action.actionid) delete action.actionid;
         process.nextTick(() => {
             cb(null, { response: "Success", actionid, message: "Queue status will follow" });
             fakeAmi.emit("managerevent", {
@@ -144,6 +146,7 @@ async function run() {
                 queue: "650",
             });
         });
+        return actionid;
     };
 
     const qRes = await pbxService.__test.collectQueueStatusFromAmi(fakeAmi, "650", 1500);
