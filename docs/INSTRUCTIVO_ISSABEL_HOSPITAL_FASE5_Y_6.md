@@ -76,11 +76,14 @@ write = system,call,log,verbose,command,agent,user,config,originate,reporting
     same => n,Stasis(ariana-trunk)
     same => n,Hangup()
    ```
-2. Crear una **cola espejo de pruebas** (ej. `[659]` en `queues_custom.conf` o desde Issabel GUI) con 1–2 extensiones piloto (`101`, `102`), configurada para reparto limpio y sin doble timbre:
+2. Crear una **cola espejo de pruebas** (ej. `[659]` en `queues_custom.conf` o desde Issabel GUI) con 1–2 extensiones piloto (`101`, `102`), configurada para reparto limpio, paralelo y sin doble timbre:
    * `strategy=rrmemory` *(o `leastrecent`; evitar `ringall` en producción)*
+   * `autofill=yes` *(obligatorio para repartir llamadas simultáneas a múltiples asesores libres sin bloqueo cabeza de fila)*
+   * `autopause=no` *(evita que un timeout sin contestar pause silenciosamente al asesor en Asterisk)*
    * `ringinuse=no`
    * `wrapuptime=3`
    * `eventwhencalled=yes`
+   * `eventmemberstatus=yes`
    * Timeout de cola holgado (ej. `180`–`300` s o música en espera sin cortar a los 30 s) y enrutar hacia esa cola **únicamente un DID de pruebas o una opción oculta de IVR** (tráfico bajo).
 
 3. **Bloque E (Solo si operará Plan A `sip_bridge` en navegador sobre Issabel `13.30.0`):** agregar el troncal SIP interno en `/etc/asterisk/sip_custom.conf` y el contexto de puente/timbrado web en `/etc/asterisk/extensions_custom.conf` *(No requerido si se opera Plan B con MicroSIP/Zoiper/Teléfono IP)*:
