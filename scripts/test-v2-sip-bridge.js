@@ -118,6 +118,46 @@ async function run() {
     assert.strictEqual(dPrimaryHangup.isTerminal, true);
     assert.strictEqual(dPrimaryHangup.call.status, "ENDED");
 
+    // 2b. Regression: primaryCallChannel must select live caller channel (Local/...@simulador-cola;2 or SIP trunk)
+    // and NEVER select expired/ringing SIP/101 agent legs dialed by Queue 650.
+    const simCall = {
+        linkedid: "1795029061.6043",
+        channels: [
+            "Local/001@simulador-cola-0000020f;2",
+            "SIP/101-00000015",
+            "SIP/101-00000016",
+        ],
+        events: [
+            { event: "queuecallerjoin", channel: "Local/001@simulador-cola-0000020f;2" },
+            { event: "agentcalled", channel: "Local/001@simulador-cola-0000020f;2", destChannel: "SIP/101-00000015" },
+            { event: "hangup", channel: "SIP/101-00000015" },
+            { event: "dialbegin", channel: "Local/001@simulador-cola-0000020f;2", destChannel: "SIP/101-00000016" },
+        ],
+    };
+    assert.strictEqual(
+        pbxService.__test.primaryCallChannel(simCall),
+        "Local/001@simulador-cola-0000020f;2",
+        "primaryCallChannel must choose live caller leg over SIP/101 agent leg"
+    );
+
+    // Ensure CallStateService also keeps primaryChannel locked against subsequent agent Newchannel events
+    const sipAgentTracker = new CallStateService();
+    const sipLid = "1795029999.1";
+    sipAgentTracker.processEvent({
+        event: "queuecallerjoin",
+        linkedid: sipLid,
+        uniqueid: sipLid,
+        channel: "Local/001@simulador-cola-00000210;2",
+        queue: "650",
+    });
+    const afterAgentNewChan = sipAgentTracker.processEvent({
+        event: "newchannel",
+        linkedid: sipLid,
+        uniqueid: "1795029999.9",
+        channel: "SIP/101-00000015",
+    });
+    assert.strictEqual(afterAgentNewChan.call.primaryChannel, "Local/001@simulador-cola-00000210;2");
+
     // 3. Bridge token resolution inside ari-bridge.service
     ariBridgeService.__test.clearTokens();
     const token = ariBridgeService.registerBridgeToken("1795099888.1", { agentId: 7 });

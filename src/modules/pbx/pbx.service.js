@@ -930,28 +930,80 @@ function redirectCallToBridge(linkedid, bridgeToken, dialContext = env.sipBridge
 function primaryCallChannel(call) {
     if (!call) return "";
 
-    // 1. External non-local channel (e.g. PJSIP/..., SIP/..., DAHDI/...) excluding bridge legs
-    const external = (call.channels || []).find(
-        (ch) => ch && !ch.startsWith("Local/") && !ch.startsWith("UnicastRTP/") && !isBridgeLegChannel(ch)
+    const events = Array.isArray(call.events) ? call.events : [];
+    const hungupChannels = new Set();
+    const agentDestChannels = new Set();
+    const queueCallerChannels = [];
+
+    for (const ev of events) {
+        const name = String(ev?.event || "").toLowerCase();
+        const ch = String(ev?.channel || "").trim();
+        const dest = String(ev?.destChannel || "").trim();
+
+        if (name === "hangup" && ch) {
+            hungupChannels.add(ch);
+        }
+        if ((name === "agentcalled" || name === "dialbegin") && dest) {
+            agentDestChannels.add(dest);
+        }
+        if (name === "queuecallerjoin" && ch) {
+            queueCallerChannels.push(ch);
+        }
+    }
+
+    const isEligibleCaller = (ch) =>
+        Boolean(ch) &&
+        !ch.startsWith("UnicastRTP/") &&
+        !isBridgeLegChannel(ch) &&
+        classifyChannel(ch) !== "agent_leg" &&
+        !agentDestChannels.has(ch);
+
+    // 1. Live caller leg explicitly registered on QueueCallerJoin
+    for (let i = queueCallerChannels.length - 1; i >= 0; i -= 1) {
+        const ch = queueCallerChannels[i];
+        if (isEligibleCaller(ch) && !hungupChannels.has(ch)) {
+            return ch;
+        }
+    }
+
+    // 2. Canonical primaryChannel tracked by callState when still live & eligible
+    const stateCall = call.linkedid ? callState.getCall(call.linkedid) : null;
+    if (
+        stateCall?.primaryChannel &&
+        isEligibleCaller(stateCall.primaryChannel) &&
+        !hungupChannels.has(stateCall.primaryChannel)
+    ) {
+        return stateCall.primaryChannel;
+    }
+
+    const channels = Array.isArray(call.channels) ? call.channels : [];
+
+    // 3. Live external non-local channel excluding agent dial destinations and bridge legs
+    const liveExternal = channels.find(
+        (ch) => !ch.startsWith("Local/") && isEligibleCaller(ch) && !hungupChannels.has(ch)
     );
-    if (external) {
-        return external;
+    if (liveExternal) {
+        return liveExternal;
     }
 
-    // 2. Non-local dialbegin channel excluding bridge legs
-    const nonLocalDialBegin = [...call.events]
-        .reverse()
-        .find((event) => event.event === "dialbegin" && event.channel && !event.channel.startsWith("Local/") && !isBridgeLegChannel(event.channel));
-    if (nonLocalDialBegin?.channel) {
-        return nonLocalDialBegin.channel;
+    // 4. Live eligible channel (e.g. Local/*@simulador-cola;2 or Local trunk)
+    const liveEligible = channels.find((ch) => isEligibleCaller(ch) && !hungupChannels.has(ch));
+    if (liveEligible) {
+        return liveEligible;
     }
 
-    // 3. Fallback
-    const dialBegin = [...call.events]
-        .reverse()
-        .find((event) => event.event === "dialbegin" && event.channel);
+    // 5. Fallback for synthetic calls or tests without active channels
+    const anyQueueJoin = queueCallerChannels[queueCallerChannels.length - 1];
+    if (anyQueueJoin && isEligibleCaller(anyQueueJoin)) {
+        return anyQueueJoin;
+    }
 
-    return dialBegin?.channel || call.channels[0] || "";
+    const anyExternal = channels.find((ch) => !ch.startsWith("Local/") && isEligibleCaller(ch));
+    if (anyExternal) {
+        return anyExternal;
+    }
+
+    return channels.find(isEligibleCaller) || channels[0] || "";
 }
 
 function isFinalCallStatus(status) {
@@ -2331,6 +2383,7 @@ module.exports = {
     __test: {
         updateCallSummary,
         collectQueueStatusFromAmi,
+        primaryCallChannel,
         setAmiAsteriskVersionForTest(raw) {
             amiAsteriskRawVersion = raw || null;
             amiAsteriskDetectedAt = raw ? new Date().toISOString() : null;

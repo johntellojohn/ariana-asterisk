@@ -297,10 +297,11 @@ async function startMediaSessionByLinkedId(linkedid, options = {}) {
             bridgeToken,
             dialContext: env.sipBridgeDialContext,
         });
-        redirectedPbxChannel = await redirectTrackedCallToSipBridge(targetLinkedid, bridgeToken);
+        const redirectOutcome = await redirectTrackedCallToSipBridge(targetLinkedid, bridgeToken);
+        redirectedPbxChannel = redirectOutcome.channel;
         baseSession = await waitForAriSession(
             targetLinkedid,
-            env.sipBridgeWaitMs || env.ariStasisWaitMs,
+            redirectOutcome.failed ? 150 : (env.sipBridgeWaitMs || env.ariStasisWaitMs),
             [bridgeToken, outboundKey, redirectedPbxChannel],
             targetAriClient
         );
@@ -310,8 +311,14 @@ async function startMediaSessionByLinkedId(linkedid, options = {}) {
             hasSession: Boolean(baseSession),
             inStasis: Boolean(baseSession?.inStasis),
         });
-        redirectedPbxChannel = await redirectTrackedCallToStasis(targetLinkedid);
-        baseSession = await waitForAriSession(targetLinkedid, env.ariStasisWaitMs, [outboundKey, redirectedPbxChannel], targetAriClient);
+        const redirectOutcome = await redirectTrackedCallToStasis(targetLinkedid);
+        redirectedPbxChannel = redirectOutcome.channel;
+        baseSession = await waitForAriSession(
+            targetLinkedid,
+            redirectOutcome.failed ? 150 : env.ariStasisWaitMs,
+            [outboundKey, redirectedPbxChannel],
+            targetAriClient
+        );
     } else if (isOutbound && (!baseSession || !baseSession.inStasis)) {
         console.log("[ari:media] waiting for outbound call to enter Stasis without redirect", {
             targetLinkedid,
@@ -513,45 +520,40 @@ function registerPbxAliasesForCall(targetLinkedid, extraChannel = null, ariClien
     return Array.from(keys).filter(Boolean);
 }
 
-async function redirectTrackedCallToStasis(linkedid) {
-    registerPbxAliasesForCall(linkedid, null, ariService);
-    callState.markStasisRedirectPending(linkedid, Math.max(7000, Number(env.ariStasisWaitMs || 5000) + 2500));
+async function redirectTrackedCall(linkedid, { bridgeToken = null } = {}) {
+    const useSipBridge = Boolean(bridgeToken);
+    const targetAriClient = useSipBridge ? ariBridgeService : ariService;
+    const waitBudget = Number((useSipBridge ? env.sipBridgeWaitMs : env.ariStasisWaitMs) || env.ariStasisWaitMs || 5000);
+
+    registerPbxAliasesForCall(linkedid, null, targetAriClient);
+    callState.markStasisRedirectPending(linkedid, Math.max(7000, waitBudget + 2500));
+
     try {
-        const result = await pbxService.redirectCallToStasis(linkedid);
+        const result = useSipBridge
+            ? await pbxService.redirectCallToBridge(linkedid, bridgeToken, env.sipBridgeDialContext)
+            : await pbxService.redirectCallToStasis(linkedid);
         const redirectedChannel = result?.channel ? String(result.channel).trim() : null;
         if (redirectedChannel) {
-            registerPbxAliasesForCall(linkedid, redirectedChannel, ariService);
+            registerPbxAliasesForCall(linkedid, redirectedChannel, targetAriClient);
         }
-        return redirectedChannel;
+        return { channel: redirectedChannel, failed: false, errorMessage: null };
     } catch (error) {
         callState.clearStasisRedirectPending(linkedid);
-        console.warn("[ari:media] redirect to Stasis failed", {
+        console.warn(`[ari:media] redirect to ${useSipBridge ? "SIP bridge" : "Stasis"} failed`, {
             linkedid,
+            ...(bridgeToken ? { bridgeToken } : {}),
             message: error.message,
         });
-        return null;
+        return { channel: null, failed: true, errorMessage: error.message };
     }
 }
 
-async function redirectTrackedCallToSipBridge(linkedid, bridgeToken) {
-    registerPbxAliasesForCall(linkedid, null, ariBridgeService);
-    callState.markStasisRedirectPending(linkedid, Math.max(7000, Number(env.sipBridgeWaitMs || env.ariStasisWaitMs || 5000) + 2500));
-    try {
-        const result = await pbxService.redirectCallToBridge(linkedid, bridgeToken, env.sipBridgeDialContext);
-        const redirectedChannel = result?.channel ? String(result.channel).trim() : null;
-        if (redirectedChannel) {
-            registerPbxAliasesForCall(linkedid, redirectedChannel, ariBridgeService);
-        }
-        return redirectedChannel;
-    } catch (error) {
-        callState.clearStasisRedirectPending(linkedid);
-        console.warn("[ari:media] redirect to SIP bridge failed", {
-            linkedid,
-            bridgeToken,
-            message: error.message,
-        });
-        return null;
-    }
+function redirectTrackedCallToStasis(linkedid) {
+    return redirectTrackedCall(linkedid);
+}
+
+function redirectTrackedCallToSipBridge(linkedid, bridgeToken) {
+    return redirectTrackedCall(linkedid, { bridgeToken });
 }
 
 async function waitForAriSession(linkedid, timeoutMs, fallbackKeys = null, ariClient = ariService) {

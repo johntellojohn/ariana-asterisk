@@ -220,6 +220,13 @@ class CallStateService {
         const channel = String(event.channel || "").trim();
         if (!channel) return;
 
+        // Track agent ring/dial subchannels so their Newchannel/Hangup events never hijack primaryChannel
+        const eventName = String(event.event || "").toLowerCase();
+        const destChannel = String(event.destChannel || "").trim();
+        if (destChannel && (eventName === "agentcalled" || eventName === "dialbegin")) {
+            call.agentChannels.add(destChannel);
+        }
+
         const kind = classifyChannel(channel, event.context);
         if (kind === "internal_media") {
             return;
@@ -227,7 +234,7 @@ class CallStateService {
 
         call.channels.add(channel);
 
-        if (kind === "agent_leg") {
+        if (kind === "agent_leg" || call.agentChannels.has(channel)) {
             call.agentChannels.add(channel);
             return;
         }
@@ -237,9 +244,9 @@ class CallStateService {
         }
 
         // QueueCallerJoin channel is always the canonical caller leg waiting in queue
-        const eventName = String(event.event || "").toLowerCase();
         if (eventName === "queuecallerjoin") {
             call.primaryChannel = channel;
+            call.primaryLockedByQueueJoin = true;
             return;
         }
 
@@ -248,9 +255,15 @@ class CallStateService {
             return;
         }
 
-        // Upgrade Local caller channel to physical SIP/PJSIP/DAHDI trunk channel if both exist
+        // Upgrade Local caller channel to physical SIP/PJSIP/DAHDI trunk channel only before queue/agent dialing
         const currentKind = classifyChannel(call.primaryChannel);
-        if (currentKind !== "trunk_or_sip" && kind === "trunk_or_sip" && eventName === "newchannel") {
+        if (
+            !call.primaryLockedByQueueJoin &&
+            !call.queue &&
+            currentKind !== "trunk_or_sip" &&
+            kind === "trunk_or_sip" &&
+            eventName === "newchannel"
+        ) {
             call.primaryChannel = channel;
         }
     }
