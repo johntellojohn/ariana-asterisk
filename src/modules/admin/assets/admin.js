@@ -162,6 +162,81 @@
     if (tabId === "config") loadConfig();
   }
 
+  function renderChannelCell(channel, dstChannel) {
+    if (!channel && !dstChannel) {
+      return `<span class="muted">-</span>`;
+    }
+    const primaryHtml = channel
+      ? `<button type="button" class="channel-code" data-copy-channel="${escapeHtml(channel)}" title="Clic para copiar canal PBX">${escapeHtml(channel)}</button>`
+      : `<span class="muted">-</span>`;
+    const dstHtml =
+      dstChannel && dstChannel !== channel
+        ? `<div class="channel-sub"><button type="button" class="channel-code channel-code-sub" data-copy-channel="${escapeHtml(dstChannel)}" title="Clic para copiar canal destino">&rarr; ${escapeHtml(dstChannel)}</button></div>`
+        : "";
+    return `<div class="channel-cell">${primaryHtml}${dstHtml}</div>`;
+  }
+
+  function showCallsFeedback(message, isError = false) {
+    const el = document.getElementById("calls-action-feedback");
+    if (!el) return;
+    el.className = `alert ${isError ? "alert-error" : "alert-ok"}`;
+    el.textContent = message;
+    el.classList.remove("hidden");
+  }
+
+  async function copyChannelText(channel, triggerEl) {
+    if (!channel) return;
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(channel);
+      } else {
+        const tmp = document.createElement("textarea");
+        tmp.value = channel;
+        tmp.setAttribute("readonly", "");
+        tmp.style.position = "fixed";
+        tmp.style.opacity = "0";
+        document.body.appendChild(tmp);
+        tmp.select();
+        document.execCommand("copy");
+        document.body.removeChild(tmp);
+      }
+      if (triggerEl) {
+        const prev = triggerEl.dataset.prevText || triggerEl.textContent;
+        triggerEl.dataset.prevText = prev;
+        triggerEl.textContent = "Copiado";
+        triggerEl.classList.add("is-copied");
+        setTimeout(() => {
+          triggerEl.textContent = prev;
+          triggerEl.classList.remove("is-copied");
+        }, 1200);
+      }
+    } catch (error) {
+      console.warn("[admin] copy channel failed", error);
+    }
+  }
+
+  async function hangupChannelFromUi(channel, linkedid, btnEl) {
+    if (!channel) return;
+    const confirmed = window.confirm(
+      `¿Colgar forzadamente el canal en Issabel?\n\nCanal: ${channel}${linkedid ? `\nLinkedID: ${linkedid}` : ""}`
+    );
+    if (!confirmed) return;
+
+    if (btnEl) btnEl.disabled = true;
+    try {
+      await apiJson("/admin/api/channels/hangup", {
+        method: "POST",
+        body: JSON.stringify({ channel, linkedid: linkedid || null }),
+      });
+      showCallsFeedback(`Canal colgado en Issabel: ${channel}`, false);
+      loadOverview();
+    } catch (error) {
+      showCallsFeedback(`No se pudo colgar ${channel}: ${error.message}`, true);
+    } finally {
+      if (btnEl) btnEl.disabled = false;
+    }
+  }
+
   function statusPill(status) {
     const upper = String(status || "").toUpperCase();
     let cls = "pill-info";
@@ -300,20 +375,29 @@
 
       const callsBody = document.getElementById("calls-tbody");
       if (!data.calls || data.calls.length === 0) {
-        callsBody.innerHTML = `<tr><td colspan="7" class="muted">Sin llamadas registradas aún.</td></tr>`;
+        callsBody.innerHTML = `<tr><td colspan="9" class="muted">Sin llamadas registradas aún.</td></tr>`;
       } else {
         callsBody.innerHTML = data.calls
           .map(
-            (call) => `
+            (call) => {
+              const actionHtml = call.channel
+                ? call.isActive
+                  ? `<button type="button" class="btn btn-danger btn-sm" data-hangup-channel="${escapeHtml(call.channel)}" data-linkedid="${escapeHtml(call.linkedid)}">Colgar</button>`
+                  : `<button type="button" class="btn btn-ghost btn-sm" data-copy-channel="${escapeHtml(call.channel)}">Copiar</button>`
+                : `<span class="muted">-</span>`;
+              return `
             <tr>
               <td><code>${escapeHtml(call.linkedid)}</code></td>
+              <td>${renderChannelCell(call.channel, call.dstChannel)}</td>
               <td>${escapeHtml(call.from)}</td>
               <td>${call.queuePosition ? `<span class="pill pill-warn">#${escapeHtml(call.queuePosition)}</span> ` : ""}${escapeHtml(call.queue)} / ${escapeHtml(call.extension)}</td>
               <td>${statusPill(call.status)}</td>
               <td>${formatDuration(call.waitSeconds)}</td>
               <td>${call.talkSeconds > 0 ? formatDuration(call.talkSeconds) : "-"}</td>
               <td>${escapeHtml(formatTime(call.lastEventTime))}</td>
-            </tr>`
+              <td>${actionHtml}</td>
+            </tr>`;
+            }
           )
           .join("");
       }
@@ -339,7 +423,7 @@
 
       const tbody = document.getElementById("audit-tbody");
       if (!data.entries || data.entries.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="8" class="muted">Sin eventos para los filtros seleccionados.</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="9" class="muted">Sin eventos para los filtros seleccionados.</td></tr>`;
         return;
       }
 
@@ -351,6 +435,7 @@
             <td><span class="pill pill-info">${escapeHtml(item.category)}</span></td>
             <td>${escapeHtml(item.type)}</td>
             <td><code>${escapeHtml(item.linkedid || "-")}</code></td>
+            <td>${renderChannelCell(item.channel, item.dstChannel)}</td>
             <td>${escapeHtml(item.caller || "-")}</td>
             <td>${escapeHtml(item.queue || "-")} / ${escapeHtml(item.agentExtension || "-")}</td>
             <td>${escapeHtml(item.outcome || "-")}</td>
@@ -564,6 +649,21 @@
   document.getElementById("config-form").addEventListener("submit", saveConfig);
   document.getElementById("credentials-form").addEventListener("submit", saveCredentials);
   document.getElementById("run-diag-btn").addEventListener("click", runDiagnostics);
+
+  function handleChannelTableClick(event) {
+    const hangupBtn = event.target.closest("[data-hangup-channel]");
+    if (hangupBtn) {
+      hangupChannelFromUi(hangupBtn.dataset.hangupChannel, hangupBtn.dataset.linkedid, hangupBtn);
+      return;
+    }
+    const copyBtn = event.target.closest("[data-copy-channel]");
+    if (copyBtn) {
+      copyChannelText(copyBtn.dataset.copyChannel, copyBtn);
+    }
+  }
+
+  document.getElementById("calls-tbody")?.addEventListener("click", handleChannelTableClick);
+  document.getElementById("audit-tbody")?.addEventListener("click", handleChannelTableClick);
 
   loadOverview();
   setupAutoRefresh();

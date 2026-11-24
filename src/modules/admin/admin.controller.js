@@ -124,17 +124,20 @@ function renderAdminHtml() {
             <button id="flush-outbox-btn" class="btn btn-secondary btn-sm" type="button">Drenar Outbox Offline</button>
           </div>
         </div>
+        <div id="calls-action-feedback" class="alert hidden"></div>
         <div class="table-wrap">
           <table>
             <thead>
               <tr>
                 <th>LinkedID</th>
+                <th>Canal PBX</th>
                 <th>Origen</th>
                 <th>Cola / Ext</th>
                 <th>Estado</th>
                 <th>Espera</th>
                 <th>Hablado</th>
                 <th>Último Evento</th>
+                <th>Acción</th>
               </tr>
             </thead>
             <tbody id="calls-tbody"></tbody>
@@ -158,7 +161,7 @@ function renderAdminHtml() {
             <option value="config">Configuración</option>
             <option value="system">Sistema</option>
           </select>
-          <input id="audit-search" type="text" placeholder="Buscar linkedid, teléfono, cola..." />
+          <input id="audit-search" type="text" placeholder="Buscar linkedid, canal, teléfono, cola..." />
           <button class="btn btn-primary btn-sm" type="submit">Filtrar</button>
         </form>
         <div class="table-wrap">
@@ -169,6 +172,7 @@ function renderAdminHtml() {
                 <th>Categoría</th>
                 <th>Tipo</th>
                 <th>LinkedID</th>
+                <th>Canal PBX</th>
                 <th>Origen</th>
                 <th>Cola/Ext</th>
                 <th>Resultado</th>
@@ -360,6 +364,23 @@ async function getOverviewApi(req, res) {
     }
 
     const legacyCalls = pbxService.getCallsSummary().slice(0, 60);
+    const combinedByLinkedId = new Map(legacyCalls.map((item) => [item.linkedid, item]));
+    for (const state of callState.getAllCalls()) {
+        if (state && state.linkedid && !combinedByLinkedId.has(state.linkedid)) {
+            combinedByLinkedId.set(state.linkedid, {
+                linkedid: state.linkedid,
+                from: state.callerNumber || "-",
+                to: state.answeredExtension || state.targetExtension || state.queue || "-",
+                status: state.status,
+                answered: Boolean(state.answered),
+                firstEventTime: state.firstEventAt,
+                lastEventTime: state.lastEventAt,
+                primaryChannel: state.primaryChannel || null,
+                channels: Array.from(state.channels || []),
+            });
+        }
+    }
+
     const activeWaitingStates = callState
         .getAllCalls()
         .filter((item) => ["QUEUE_WAITING", "RINGING"].includes(String(item.status || "").toUpperCase()))
@@ -370,20 +391,41 @@ async function getOverviewApi(req, res) {
         queuePositionByLinkedId.set(item.linkedid, index + 1);
     });
 
-    const mergedCalls = legacyCalls.map((call) => {
+    const ACTIVE_CALL_STATUSES = new Set(["NEW", "QUEUE_WAITING", "RINGING", "ANSWERED", "ANSWER", "BRIDGED"]);
+
+    const mergedCalls = Array.from(combinedByLinkedId.values()).map((call) => {
         const state = callState.getCall(call.linkedid);
         const waitEnd = state?.answeredAt || state?.endedAt || null;
         const waitStart = state?.queueJoinedAt || state?.firstEventAt || call.firstEventTime;
         const waitSeconds = computeSecondsBetween(waitStart, waitEnd);
         const talkSeconds = state?.answeredAt ? computeSecondsBetween(state.answeredAt, state.endedAt) : 0;
         const status = state?.status || call.status;
+        const allChannels = Array.from(
+            new Set([
+                ...(state?.channels ? Array.from(state.channels) : []),
+                ...(Array.isArray(call.channels) ? call.channels : []),
+            ].filter(Boolean))
+        );
+        const channel =
+            state?.primaryChannel ||
+            call.primaryChannel ||
+            allChannels[0] ||
+            null;
+        const dstChannel =
+            state?.agentChannels && state.agentChannels.size > 0
+                ? Array.from(state.agentChannels).slice(-1)[0]
+                : null;
 
         return {
             linkedid: call.linkedid,
+            channel,
+            dstChannel,
+            channels: allChannels,
             from: state?.callerNumber || call.from || "-",
             queue: state?.queue || "-",
             extension: state?.answeredExtension || state?.targetExtension || call.to || "-",
             status,
+            isActive: ACTIVE_CALL_STATUSES.has(String(status || "").toUpperCase()),
             answered: Boolean(state?.answered || call.answered),
             queuePosition: queuePositionByLinkedId.get(call.linkedid) || null,
             waitSeconds,
@@ -491,6 +533,64 @@ async function flushOutboxApi(_req, res) {
         ok: true,
         outbox: webhookDispatcher.getStats(),
     });
+}
+
+async function hangupChannelApi(req, res) {
+    const channel = String(req.body?.channel || "").trim();
+    const linkedid = String(req.body?.linkedid || "").trim() || null;
+    const reason = String(req.body?.reason || "admin_manual_hangup").trim() || "admin_manual_hangup";
+    const actor = adminAuth.getPublicUser()?.username || "admin";
+
+    if (!channel || channel.length > 160 || !/^[A-Za-z0-9_./@:;+-]+$/.test(channel)) {
+        return res.status(400).json({
+            ok: false,
+            message: "Canal PBX inválido o vacío.",
+        });
+    }
+
+    if (!pbxService.getStatus().connected) {
+        return res.status(503).json({
+            ok: false,
+            message: "Issabel AMI no está conectado para colgar el canal.",
+        });
+    }
+
+    try {
+        const response = await pbxService.hangupChannelByName(channel, reason);
+        auditLog.record({
+            category: "system",
+            type: "admin_channel_hangup",
+            linkedid,
+            channel,
+            outcome: "ok",
+            summary: `Canal colgado manualmente por ${actor} (${reason})`,
+        });
+
+        return res.json({
+            ok: true,
+            channel,
+            linkedid,
+            response,
+        });
+    } catch (error) {
+        const message = error?.message || "No se pudo colgar el canal en Issabel.";
+        const notFound = /no such channel|not found/i.test(message);
+
+        auditLog.record({
+            category: "system",
+            type: "admin_channel_hangup",
+            linkedid,
+            channel,
+            outcome: notFound ? "not_found" : "error",
+            summary: `Fallo al colgar canal por ${actor}: ${message}`,
+        });
+
+        return res.status(notFound ? 409 : 502).json({
+            ok: false,
+            channel,
+            message,
+        });
+    }
 }
 
 function getConfigApi(_req, res) {
@@ -739,6 +839,7 @@ module.exports = {
     getOverviewApi,
     getAuditApi,
     flushOutboxApi,
+    hangupChannelApi,
     getConfigApi,
     updateConfigApi,
     runDiagnosticsApi,

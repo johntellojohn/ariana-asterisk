@@ -16,6 +16,7 @@ router.post("/api/credentials", adminAuth.requireAdminAuth("api"), adminControll
 router.get("/api/overview", adminAuth.requireAdminAuth("api"), adminController.getOverviewApi);
 router.get("/api/audit", adminAuth.requireAdminAuth("api"), adminController.getAuditApi);
 router.post("/api/outbox/flush", adminAuth.requireAdminAuth("api"), adminController.flushOutboxApi);
+router.post("/api/channels/hangup", adminAuth.requireAdminAuth("api"), adminController.hangupChannelApi);
 router.get("/api/config", adminAuth.requireAdminAuth("api"), adminController.getConfigApi);
 router.post("/api/config", adminAuth.requireAdminAuth("api"), adminController.updateConfigApi);
 router.post("/api/diagnostics", adminAuth.requireAdminAuth("api"), adminController.runDiagnosticsApi);

@@ -50,8 +50,24 @@ function extractWebhookAuditContext(outboundBody = {}) {
                 (summaryTo && summaryTo !== String(queue || "") ? summaryTo : "") ||
                 ""
         ).trim() || null;
+    const channel =
+        String(
+            outboundBody.channel ||
+                summary.channel ||
+                summary.primaryChannel ||
+                ev.channel ||
+                ""
+        ).trim() || null;
+    const dstChannel =
+        String(
+            outboundBody.dstChannel ||
+                outboundBody.dst_channel ||
+                summary.dstChannel ||
+                ev.destChannel ||
+                ""
+        ).trim() || null;
 
-    return { queue, caller, agentExtension };
+    return { queue, caller, agentExtension, channel, dstChannel };
 }
 
 class WebhookDispatcherService {
@@ -476,6 +492,8 @@ class WebhookDispatcherService {
                         category: "webhook",
                         type: outboundBody.event_type || outboundBody.event || "trunk_event",
                         linkedid: outboundBody.linkedid || item.queueKey,
+                        channel: meta.channel,
+                        dstChannel: meta.dstChannel,
                         queue: meta.queue,
                         caller: meta.caller,
                         agentExtension: meta.agentExtension,
@@ -498,6 +516,8 @@ class WebhookDispatcherService {
                             category: "webhook",
                             type: "dead_letter",
                             linkedid: outboundBody.linkedid || item.queueKey,
+                            channel: meta.channel,
+                            dstChannel: meta.dstChannel,
                             queue: meta.queue,
                             caller: meta.caller,
                             agentExtension: meta.agentExtension,

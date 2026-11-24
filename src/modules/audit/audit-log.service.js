@@ -79,6 +79,8 @@ class AuditLogService {
             category: entry.category || "system",
             type: entry.type || "event",
             linkedid: entry.linkedid || null,
+            channel: entry.channel || null,
+            dstChannel: entry.dstChannel || null,
             queue: entry.queue || null,
             caller: entry.caller || null,
             agentExtension: entry.agentExtension || null,
@@ -164,6 +166,8 @@ class AuditLogService {
         const limit = Math.min(Math.max(Number(filters.limit) || 200, 1), 1000);
         const category = filters.category ? String(filters.category).trim().toLowerCase() : "";
         const linkedid = filters.linkedid ? String(filters.linkedid).trim() : "";
+        const queue = filters.queue ? String(filters.queue).trim() : "";
+        const search = filters.search ? String(filters.search).trim().toLowerCase() : "";
 
         try {
             const raw = await fs.readFile(filePath, "utf8");
@@ -175,6 +179,11 @@ class AuditLogService {
                     const item = JSON.parse(lines[i]);
                     if (category && String(item.category || "").toLowerCase() !== category) continue;
                     if (linkedid && String(item.linkedid || "") !== linkedid) continue;
+                    if (queue && String(item.queue || "") !== queue) continue;
+                    if (search) {
+                        const haystack = JSON.stringify(item).toLowerCase();
+                        if (!haystack.includes(search)) continue;
+                    }
                     results.push(item);
                     if (results.length >= limit) break;
                 } catch (_err) {

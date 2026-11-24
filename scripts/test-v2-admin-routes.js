@@ -9,6 +9,7 @@ const env = require("../src/config/env");
 const configStore = require("../src/modules/config/config-store.service");
 const adminAuth = require("../src/modules/admin/admin-auth.service");
 const auditLog = require("../src/modules/audit/audit-log.service");
+const callState = require("../src/modules/pbx/call-state.service");
 const webhookDispatcher = require("../src/modules/laravel/webhook-dispatcher.service");
 
 async function request(server, method, reqPath, { body = null, headers = {} } = {}) {
@@ -106,8 +107,21 @@ async function run() {
         assert.strictEqual(adminHtml.status, 200);
         assert.strictEqual(adminHtml.text.includes("<script src=\"/admin/assets/admin.js\""), true);
         assert.strictEqual(/<script(?![^>]*src=)/i.test(adminHtml.text), false);
+        assert.strictEqual(/\sonclick=/i.test(adminHtml.text), false);
+        assert.strictEqual(adminHtml.text.includes("<th>Canal PBX</th>"), true);
 
-        // 6. Overview, config save (disabled AMI/ARI so no external socket attempt), & audit endpoints work
+        // 6. Overview exposes primary PBX channel & dstChannel for active/recent calls
+        callState.reset();
+        const seededCall = callState.ensureCall("1795559999.101");
+        seededCall.status = "RINGING";
+        seededCall.queue = "650";
+        seededCall.callerNumber = "0991234567";
+        seededCall.targetExtension = "101";
+        seededCall.primaryChannel = "SIP/troncal-hospital-000004a2";
+        seededCall.channels.add("SIP/troncal-hospital-000004a2");
+        seededCall.agentChannels.add("Local/101@ariana-web-agent-0000010f;1");
+        seededCall.channels.add("Local/101@ariana-web-agent-0000010f;1");
+
         const overviewRes = await request(server, "GET", "/admin/api/overview", {
             headers: { Cookie: cookieHeader },
         });
@@ -115,6 +129,11 @@ async function run() {
         assert.strictEqual(overviewRes.json.ok, true);
         assert.ok(overviewRes.json.capabilities && "effectiveAnswerMode" in overviewRes.json.capabilities);
         assert.ok(overviewRes.json.queueSummary && Array.isArray(overviewRes.json.queueSummary.waitingList));
+        const trackedCall = overviewRes.json.calls.find((c) => c.linkedid === "1795559999.101");
+        assert.ok(trackedCall, "Overview should include tracked call from callState");
+        assert.strictEqual(trackedCall.channel, "SIP/troncal-hospital-000004a2");
+        assert.strictEqual(trackedCall.dstChannel, "Local/101@ariana-web-agent-0000010f;1");
+        assert.strictEqual(trackedCall.isActive, true);
 
         const healthRes = await request(server, "GET", "/api/health");
         assert.strictEqual(healthRes.status, 200);
@@ -134,14 +153,58 @@ async function run() {
         assert.strictEqual(saveCfgRes.json.values.laravelTenantDatabase, "sigcrm_hospital_test");
         assert.strictEqual(saveCfgRes.json.values.pbxAnswerMode, "extension");
 
-        const auditRes = await request(server, "GET", "/admin/api/audit", {
+        // 7. Caja Negra stores channel & dstChannel and supports search on live & JSONL day
+        auditLog.record({
+            category: "call",
+            type: "ENDED",
+            linkedid: "1795559999.101",
+            channel: "SIP/troncal-hospital-000004a2",
+            dstChannel: "Local/101@ariana-web-agent-0000010f;1",
+            queue: "650",
+            caller: "0991234567",
+            agentExtension: "101",
+            outcome: "primary_hangup_after_answer",
+            summary: "Terminal ENDED (SIP/troncal-hospital-000004a2)",
+        });
+        await auditLog.flush();
+
+        const auditRes = await request(server, "GET", "/admin/api/audit?day=live&search=000004a2", {
             headers: { Cookie: cookieHeader },
         });
         assert.strictEqual(auditRes.status, 200);
-        assert.ok(auditRes.json.entries.some((e) => e.type === "config_updated"));
+        assert.strictEqual(auditRes.json.entries.length, 1);
+        assert.strictEqual(auditRes.json.entries[0].channel, "SIP/troncal-hospital-000004a2");
+        assert.strictEqual(auditRes.json.entries[0].dstChannel, "Local/101@ariana-web-agent-0000010f;1");
 
-        console.log("v2 admin routes & CSP tests passed");
+        const todayStamp = new Date().toISOString().slice(0, 10);
+        const auditDayRes = await request(server, "GET", `/admin/api/audit?day=${todayStamp}&search=000004a2`, {
+            headers: { Cookie: cookieHeader },
+        });
+        assert.strictEqual(auditDayRes.status, 200);
+        assert.strictEqual(auditDayRes.json.entries.length, 1);
+        assert.strictEqual(auditDayRes.json.entries[0].channel, "SIP/troncal-hospital-000004a2");
+
+        // 8. Manual channel hangup endpoint enforces auth, validation, and AMI connection guard
+        const unauthHangup = await request(server, "POST", "/admin/api/channels/hangup", {
+            body: { channel: "SIP/troncal-hospital-000004a2" },
+        });
+        assert.strictEqual(unauthHangup.status, 401);
+
+        const badChannelHangup = await request(server, "POST", "/admin/api/channels/hangup", {
+            headers: { Cookie: cookieHeader },
+            body: { channel: "SIP/troncal\r\nAction: Logoff" },
+        });
+        assert.strictEqual(badChannelHangup.status, 400);
+
+        const disconnectedAmiHangup = await request(server, "POST", "/admin/api/channels/hangup", {
+            headers: { Cookie: cookieHeader },
+            body: { channel: "SIP/troncal-hospital-000004a2", linkedid: "1795559999.101" },
+        });
+        assert.strictEqual(disconnectedAmiHangup.status, 503);
+
+        console.log("v2 admin routes, channel blackbox & hangup tests passed");
     } finally {
+        callState.reset();
         webhookDispatcher.stop();
         auditLog.stop();
         await new Promise((resolve) => server.close(resolve));

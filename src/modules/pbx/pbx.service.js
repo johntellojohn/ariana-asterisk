@@ -599,6 +599,7 @@ function getCallsSummary() {
             hangupCause: call.hangupCause,
             hangupText: call.hangupText,
             result: call.result,
+            primaryChannel: primaryCallChannel(call) || null,
             channels: [...call.channels],
             totalEvents: call.events.length,
         }))
@@ -1453,22 +1454,33 @@ function notifyLaravelV2(event) {
         return;
     }
 
+    const latestAgentChannel =
+        decision.call.agentChannels && decision.call.agentChannels.size > 0
+            ? Array.from(decision.call.agentChannels).slice(-1)[0]
+            : null;
+    const auditChannel = decision.call.primaryChannel || event.channel || null;
+    const auditDstChannel = String(event.destChannel || latestAgentChannel || "").trim() || null;
+
     if (decision.isTerminal) {
         auditLog.record({
             category: "call",
             type: decision.call.status,
             linkedid: decision.call.linkedid,
+            channel: auditChannel,
+            dstChannel: auditDstChannel,
             queue: decision.call.queue,
             caller: decision.call.callerNumber,
             agentExtension: decision.call.answeredExtension || decision.call.targetExtension || null,
             outcome: decision.reason,
-            summary: `Terminal ${decision.call.status} (${decision.call.primaryChannel || "no-channel"})`,
+            summary: `Terminal ${decision.call.status} (${auditChannel || "no-channel"})`,
         });
     } else if (decision.emit) {
         auditLog.record({
             category: "call",
             type: decision.emitEventName,
             linkedid: decision.call.linkedid,
+            channel: auditChannel,
+            dstChannel: auditDstChannel,
             queue: decision.call.queue,
             caller: decision.call.callerNumber,
             agentExtension: decision.call.answeredExtension || decision.call.targetExtension || null,
@@ -1512,6 +1524,8 @@ function notifyLaravelV2(event) {
         to: (legacyCall && legacyCall.to) || stateCall.targetExtension || stateCall.queue || event.destination || "",
         callerName: (legacyCall && legacyCall.callerName) || stateCall.callerName || event.callerName || "",
         queue: stateCall.queue || "",
+        channel: auditChannel || "",
+        dstChannel: auditDstChannel || "",
         status: mappedStatus,
         answered: Boolean(stateCall.answered),
         bridged: Boolean(stateCall.bridged),
