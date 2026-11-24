@@ -24,7 +24,7 @@
    * Puertos requeridos:
      * **Gateway ➔ Issabel (LAN):** TCP `5038` (AMI), TCP `8088` (ARI HTTP/WS) y UDP `10000-20000` (RTP hacia Issabel).
      * **Issabel ➔ Gateway (LAN, Plan A `sip_bridge`):** UDP/TCP `5080` (peer SIP `[ariana-bridge-sip]`) y UDP `18000-18060` + `46000-46200` (RTP bidireccional del bridge).
-     * **Navegadores / EVA Cloud hacia Gateway:** TCP `366` (HTTPS/WSS con `nginx` proxy hacia `api:3002`; en `nginx/conf/default.conf` usar `resolver 127.0.0.11 valid=10s ipv6=off;` o reiniciar `ariana-asterisk-ssl` tras reconstruir `api` para evitar `502`).
+     * **Navegadores / EVA Cloud hacia Gateway:** TCP `366` (HTTPS/WSS con `nginx` usando `docker/nginx/default.conf` del repo con `resolver 127.0.0.11` hacia `api:3002`; solo requiere montar `nginx/certs/fullchain.pem` y `nginx/certs/key.pem`, sin editar Nginx manualmente ni reiniciar SSL tras `--build`).
      * **Gateway hacia EVA Cloud:** salida HTTPS `443` saliente (webhooks + heartbeat).
 
 ---
@@ -143,10 +143,13 @@ write = system,call,log,verbose,command,agent,user,config,originate,reporting
 1. Clonar/actualizar `ariana-asterisk` en `main` en el servidor LAN:
    ```bash
    cp .env.client.example .env
-   # Editar CONFIG_MASTER_KEY, ADMIN_BOOTSTRAP_PASSWORD y SIP_BRIDGE_PUBLIC_IP (IP LAN del servidor Docker) en .env
-   mkdir -p ./data ./logs
-   docker compose -f docker-compose.yml -f docker-compose.ssl.yml up -d --build && docker restart ariana-asterisk-ssl
+   # En .env: definir CONFIG_MASTER_KEY, ADMIN_BOOTSTRAP_PASSWORD, SIP_BRIDGE_PUBLIC_IP (IP LAN Docker)
+   # y descomentar COMPOSE_FILE=docker-compose.yml:docker-compose.ssl.yml + API_HOST_PORT=127.0.0.1:3002
+   mkdir -p ./data ./logs ./nginx/certs
+   # Copiar los 2 archivos del certificado SSL en ./nginx/certs/fullchain.pem y ./nginx/certs/key.pem
+   docker compose up -d --build
    ```
+   *(Para futuras actualizaciones en el servidor, bastará un solo comando: `git pull && docker compose up -d --build`.)*
 2. Entrar a `https://PUBLIC_BASE_URL/admin` desde el navegador, iniciar sesión, **cambiar la contraseña temporal inicial** (en **Configuración PBX / EVA ➔ Credenciales Administrativas**) y completar:
    * **EVA Destino:** `LARAVEL_API_URL` (`https://sigcrm.pro` o dominio EVA Cloud), `LARAVEL_TENANT_DATABASE` (BD del tenant), `LARAVEL_API_TOKEN` / `ASTERISK_API_TOKEN` (token de `integracions` código `TRUNCAL`), `PUBLIC_BASE_URL`.
    * **Issabel Local:** IP LAN de Issabel, AMI `5038` + `[middleware]`, ARI `http://IP_ISSABEL:8088` + `[ariana]`, `ARI_APP_NAME=ariana-trunk`, Contexto `ariana-ari`, Cola `659` (en Fase 5) ➔ luego `650` (en Fase 6), RTP `46000-46200` y sección **SIP Media Bridge** habilitada (`sip_bridge` / `auto`).

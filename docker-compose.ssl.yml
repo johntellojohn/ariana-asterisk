@@ -6,7 +6,7 @@ services:
     ports:
       - "${HOST_PORT:-366}:366"
     volumes:
-      - ./nginx/conf/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./docker/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
       - ./nginx/certs:/etc/nginx/certs:ro
     depends_on:
       - api
