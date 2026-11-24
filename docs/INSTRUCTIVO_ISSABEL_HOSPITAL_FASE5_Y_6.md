@@ -142,17 +142,19 @@ write = system,call,log,verbose,command,agent,user,config,originate,reporting
 
 1. Clonar/actualizar `ariana-asterisk` en `main` en el servidor LAN:
    ```bash
-   cp .env.client.example .env
-   # En .env: definir CONFIG_MASTER_KEY, ADMIN_BOOTSTRAP_PASSWORD, SIP_BRIDGE_PUBLIC_IP (IP LAN Docker)
+   cp .env.example .env
+   # En .env (solo ~11 variables de arranque Docker): definir ADMIN_BOOTSTRAP_PASSWORD, SIP_BRIDGE_PUBLIC_IP (IP LAN Docker)
    # y descomentar COMPOSE_FILE=docker-compose.yml:docker-compose.ssl.yml + API_HOST_PORT=127.0.0.1:3002
+   # (Nota: en servidores ya inicializados NO cambiar CONFIG_MASTER_KEY para no invalidar ./data/config.enc.json)
    mkdir -p ./data ./logs ./nginx/certs
-   # Copiar los 2 archivos del certificado SSL en ./nginx/certs/fullchain.pem y ./nginx/certs/key.pem
+   # Copiar los 2 archivos del certificado SSL en ./nginx/certs/fullchain.pem y ./nginx/certs/key.pem (sin editar Nginx)
    docker compose up -d --build
    ```
-   *(Para futuras actualizaciones en el servidor, bastará un solo comando: `git pull && docker compose up -d --build`.)*
-2. Entrar a `https://PUBLIC_BASE_URL/admin` desde el navegador, iniciar sesión, **cambiar la contraseña temporal inicial** (en **Configuración PBX / EVA ➔ Credenciales Administrativas**) y completar:
+   *(Para futuras actualizaciones en el servidor, bastará un solo comando: `git pull && docker compose up -d --build` — sin `-f` ni `docker restart ariana-asterisk-ssl`.)*
+2. Entrar a `https://PUBLIC_BASE_URL/admin` desde el navegador, iniciar sesión, **cambiar la contraseña temporal inicial** (en **Configuración PBX / EVA ➔ Credenciales Administrativas**) y completar *(todo se guarda cifrado AES-256-GCM en `./data/config.enc.json`, sin texto plano en `.env`)*:
    * **EVA Destino:** `LARAVEL_API_URL` (`https://sigcrm.pro` o dominio EVA Cloud), `LARAVEL_TENANT_DATABASE` (BD del tenant), `LARAVEL_API_TOKEN` / `ASTERISK_API_TOKEN` (token de `integracions` código `TRUNCAL`), `PUBLIC_BASE_URL`.
    * **Issabel Local:** IP LAN de Issabel, AMI `5038` + `[middleware]`, ARI `http://IP_ISSABEL:8088` + `[ariana]`, `ARI_APP_NAME=ariana-trunk`, Contexto `ariana-ari`, Cola `659` (en Fase 5) ➔ luego `650` (en Fase 6), RTP `46000-46200` y sección **SIP Media Bridge** habilitada (`sip_bridge` / `auto`).
+   * **Voz IA & Grabación (sección 5):** `OpenAI API Key` (enmascarada/cifrada), `Modelo OpenAI Realtime` (`gpt-realtime`), `Voz OpenAI Realtime` (`marin`), `Grabación`, `Transcribir Audio` y `Analizar Grabación con IA`.
    * Clic en **Guardar y Reconectar en Caliente**.
 3. En `/admin` ➔ **Diagnóstico en 1 Clic**, confirmar todos los checks en verde:
    * Configuración persistente `./data` OK
@@ -197,6 +199,6 @@ Si ocurre una falla física de red/audio o incidente bloqueante durante el pase:
 * **Monitoreo 72 h (EVA Cloud + `/admin`):**
   * Revisar cada día en **Dashboard de llamadas** la barra de **Salud Gateway**: `Gateway En línea`, `AMI OK`, `ARI OK`, `Bridge SIP: OK`, `Outbox 0`, `RAM RSS` estable (`< 150 MB`) y `Latencia webhook` normal (`< 400 ms`).
   * Comparar total de entrantes vs. atendidas/abandonadas entre `CDR Report` de Issabel (`Destination = 650`) y EVA `/dashboard-calls`, y revisar `/app/data/audit/events-YYYY-MM-DD.jsonl` en `/admin` (incluyendo búsqueda por **`Canal PBX`** ante cualquier incidencia).
-* **Replicación estándar "Cliente X":**
-  * Misma imagen Docker `ariana-asterisk` (`main`), mismo `.env.client.example` de 6 variables, mismo volumen `./data:/app/data`, y alta guiada desde `/admin` + Diagnóstico en 1 Clic.
+* **Replicación estándar "Cliente X" (mismo patrón en `ariana-asterisk` y `ariana-voice`):**
+  * Misma imagen Docker (`main`), `.env.example` / `.env.client.example` mínimo, SSL opcional versionado en `docker/nginx/default.conf` + `docker-compose.ssl.yml` (solo copiar `fullchain.pem` y `key.pem` en `./nginx/certs/` sin editar archivos del repo), volumen `./data:/app/data` y alta guiada 100% desde `/admin` + Diagnóstico en 1 Clic.
 
