@@ -411,10 +411,12 @@ async function getOverviewApi(req, res) {
             call.primaryChannel ||
             allChannels[0] ||
             null;
-        const dstChannel =
-            state?.agentChannels && state.agentChannels.size > 0
-                ? Array.from(state.agentChannels).slice(-1)[0]
-                : null;
+        const agentChannelList = state?.agentChannels ? Array.from(state.agentChannels).filter(Boolean) : [];
+        const preferredAgentChannel =
+            [...agentChannelList].reverse().find((ch) => !String(ch).endsWith(";2")) ||
+            agentChannelList[agentChannelList.length - 1] ||
+            null;
+        const dstChannel = preferredAgentChannel;
 
         return {
             linkedid: call.linkedid,

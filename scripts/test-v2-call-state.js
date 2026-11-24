@@ -202,6 +202,116 @@ async function run() {
     assert.strictEqual(normRes.call.callerName, "Paciente Norte");
     assert.strictEqual(normRes.call.queue, "650");
 
+    // 7. Queue retry on SAME extension after AgentRingNoAnswer / busy WhatsApp (must NOT be permanently ring_deduped!)
+    const retryState = new CallStateService();
+    const retryLid = "1795556047.3782";
+    const retryCaller = "Local/002@simulador-cola-0000011d;2";
+    const retryAgent1 = "Local/150@ariana-web-agent-0000011e;1";
+    const retryAgent2 = "Local/150@ariana-web-agent-00000122;1";
+    const retryAgent3 = "Local/150@ariana-web-agent-00000125;1";
+
+    const rJoin = retryState.processEvent({
+        linkedid: retryLid,
+        event: "QueueCallerJoin",
+        channel: retryCaller,
+        caller: "0991000002",
+        queue: "650",
+        timestamp: "2026-11-24T21:34:07.000Z",
+    });
+    assert.strictEqual(rJoin.emit, true);
+
+    const rRing1 = retryState.processEvent({
+        linkedid: retryLid,
+        event: "AgentCalled",
+        channel: retryCaller,
+        destChannel: retryAgent1,
+        agentExtension: "150",
+        queue: "650",
+        timestamp: "2026-11-24T21:34:08.000Z",
+    });
+    assert.strictEqual(rRing1.emit, true);
+    assert.strictEqual(rRing1.reason, "ring_extension_update");
+
+    // Companion DialBegin on same attempt (;1 or ;2) MUST still be deduped
+    const rDial1 = retryState.processEvent({
+        linkedid: retryLid,
+        event: "DialBegin",
+        channel: retryCaller,
+        destChannel: "Local/150@ariana-web-agent-0000011e;2",
+        destExtension: "150",
+        queue: "650",
+        timestamp: "2026-11-24T21:34:08.050Z",
+    });
+    assert.strictEqual(rDial1.emit, false);
+    assert.strictEqual(rDial1.reason, "ring_deduped");
+
+    // Asterisk AgentRingNoAnswer (exact AMI spelling without 'er') clears target & emits canonical agentringernoanswer
+    const rNoAns = retryState.processEvent({
+        linkedid: retryLid,
+        event: "AgentRingNoAnswer",
+        channel: retryCaller,
+        destChannel: retryAgent1,
+        agentExtension: "150",
+        queue: "650",
+        timestamp: "2026-11-24T21:34:33.000Z",
+    });
+    assert.strictEqual(rNoAns.emit, true);
+    assert.strictEqual(rNoAns.emitEventName, "agentringernoanswer");
+    assert.strictEqual(rNoAns.call.status, "RINGING");
+    assert.strictEqual(rNoAns.call.targetExtension, null);
+
+    // Agent 150 finishes WhatsApp call -> Queue 650 retries 150 with new channel 00000122 -> MUST emit with new dedupeKey!
+    const rRing2 = retryState.processEvent({
+        linkedid: retryLid,
+        event: "AgentCalled",
+        channel: retryCaller,
+        destChannel: retryAgent2,
+        agentExtension: "150",
+        queue: "650",
+        timestamp: "2026-11-24T21:34:42.000Z",
+    });
+    assert.strictEqual(rRing2.emit, true);
+    assert.strictEqual(rRing2.call.status, "RINGING");
+    assert.strictEqual(rRing2.call.targetExtension, "150");
+    assert.notStrictEqual(rRing2.dedupeKey, rRing1.dedupeKey);
+
+    // Even if AgentRingNoAnswer was missed, a new channel instance 00000125 on the SAME extension 150 MUST emit!
+    const rRing3 = retryState.processEvent({
+        linkedid: retryLid,
+        event: "AgentCalled",
+        channel: retryCaller,
+        destChannel: retryAgent3,
+        agentExtension: "150",
+        queue: "650",
+        timestamp: "2026-11-24T21:35:08.000Z",
+    });
+    assert.strictEqual(rRing3.emit, true);
+    assert.strictEqual(rRing3.reason, "ring_retry_same_extension");
+    assert.notStrictEqual(rRing3.dedupeKey, rRing2.dedupeKey);
+
+    // Once answered, late AgentRingNoAnswer must be ignored
+    const rAns = retryState.processEvent({
+        linkedid: retryLid,
+        event: "AgentConnect",
+        channel: retryCaller,
+        destChannel: retryAgent3,
+        agentExtension: "150",
+        queue: "650",
+        timestamp: "2026-11-24T21:35:10.000Z",
+    });
+    assert.strictEqual(rAns.emit, true);
+    assert.strictEqual(rAns.call.status, "ANSWERED");
+    const lateNoAns = retryState.processEvent({
+        linkedid: retryLid,
+        event: "AgentRingNoAnswer",
+        channel: retryCaller,
+        destChannel: retryAgent3,
+        queue: "650",
+        timestamp: "2026-11-24T21:35:11.000Z",
+    });
+    assert.strictEqual(lateNoAns.emit, false);
+    assert.strictEqual(lateNoAns.call.status, "ANSWERED");
+
     console.log("v2 call-state & queue-presence tests passed");
 }
 

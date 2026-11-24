@@ -24,6 +24,7 @@ const trackedEvents = new Set([
     "agentconnect",
     "agentcomplete",
     "agentdump",
+    "agentringnoanswer",
     "agentringernoanswer",
     "queuememberpaused",
     "queuememberpause",
@@ -45,6 +46,8 @@ const conciseRawEvents = new Set([
     "agentcalled",
     "agentconnect",
     "agentcomplete",
+    "agentringnoanswer",
+    "agentringernoanswer",
     "queuememberpaused",
 ]);
 

@@ -34,6 +34,14 @@ function isBridgeLegChannel(channelName = "") {
     return /^(SIP|PJSIP)\/ariana-bridge-sip/i.test(String(channelName || "").trim());
 }
 
+function normalizeChannelBase(channelName = "") {
+    const ch = String(channelName || "").trim();
+    if (!ch) {
+        return "";
+    }
+    return ch.replace(/;[12]$/, "");
+}
+
 const NON_SIGNALING_AGENT_EXACT_NAMES = new Set([
     "varset",
     "newexten",
@@ -203,6 +211,9 @@ class CallStateService {
                 incomingEmitted: false,
                 answeredEmitted: false,
                 lastRingExtensionEmitted: null,
+                lastRingChannelBase: null,
+                ringAttemptCount: 0,
+                ringNoAnswerCount: 0,
                 hangupCause: null,
                 hangupText: null,
                 terminalReason: null,
@@ -407,6 +418,40 @@ class CallStateService {
             return this.buildNoop(call, "queue_leave_suppressed");
         }
 
+        // Handle agent ring timeout (Asterisk emits AgentRingNoAnswer; keep legacy spelling alias too)
+        if (eventName === "agentringnoanswer" || eventName === "agentringernoanswer") {
+            if (call.answered || call.bridged || this.hasStasisRedirectPending(linkedid) || call.stasisActivated) {
+                return this.buildNoop(call, "agent_ring_no_answer_ignored_after_answer");
+            }
+            const ringChannelBase = normalizeChannelBase(destChannel) || call.lastRingChannelBase || "";
+            const ext =
+                extractExt(
+                    event.destExtension ||
+                        event.extension ||
+                        event.agentExtension ||
+                        destChannel ||
+                        event.memberName ||
+                        event.interface ||
+                        event.agentCalled
+                ) ||
+                call.lastRingExtensionEmitted ||
+                "";
+
+            call.lastRingExtensionEmitted = null;
+            call.lastRingChannelBase = null;
+            call.targetExtension = null;
+            call.ringNoAnswerCount = (call.ringNoAnswerCount || 0) + 1;
+
+            const noAnswerKey = ringChannelBase || `${ext || "ext"}:${call.ringNoAnswerCount}`;
+            return this.buildEmission(
+                call,
+                "agentringernoanswer",
+                `RING_NOANSWER:${call.linkedid}:${noAnswerKey}`,
+                false,
+                "agent_ring_no_answer"
+            );
+        }
+
         // Handle ringing / agent assignment
         if (eventName === "agentcalled" || eventName === "dialbegin") {
             if (channelKind === "bridge_leg" || classifyChannel(destChannel) === "bridge_leg") {
@@ -415,7 +460,16 @@ class CallStateService {
             if (!call.ringStartedAt) {
                 call.ringStartedAt = nowIso;
             }
-            const ext = extractExt(event.destExtension || event.extension || destChannel || event.memberName || event.interface);
+            const ext = extractExt(
+                event.destExtension ||
+                    event.extension ||
+                    event.agentExtension ||
+                    destChannel ||
+                    event.memberName ||
+                    event.interface ||
+                    event.agentCalled
+            );
+            const ringChannelBase = normalizeChannelBase(destChannel);
             if (ext) {
                 call.targetExtension = ext;
             }
@@ -424,12 +478,34 @@ class CallStateService {
             if (!call.incomingEmitted) {
                 call.incomingEmitted = true;
                 call.lastRingExtensionEmitted = ext || null;
+                call.lastRingChannelBase = ringChannelBase || null;
+                call.ringAttemptCount = (call.ringAttemptCount || 0) + 1;
                 return this.buildEmission(call, eventName, `INCOMING:${call.linkedid}`, false, "ring_initial");
             }
 
-            if (ext && ext !== call.lastRingExtensionEmitted) {
-                call.lastRingExtensionEmitted = ext;
-                return this.buildEmission(call, eventName, `RING:${call.linkedid}:${ext}`, false, "ring_extension_update");
+            // Adopt destChannel from DialBegin paired with an earlier AgentCalled that lacked destChannel
+            if (ext && ext === call.lastRingExtensionEmitted && !call.lastRingChannelBase && ringChannelBase) {
+                call.lastRingChannelBase = ringChannelBase;
+                return this.buildNoop(call, "ring_deduped");
+            }
+
+            const isNewRingTarget = Boolean(ext && ext !== call.lastRingExtensionEmitted);
+            const isNewRingInstance = Boolean(
+                ringChannelBase && call.lastRingChannelBase && ringChannelBase !== call.lastRingChannelBase
+            );
+
+            if (isNewRingTarget || isNewRingInstance) {
+                call.lastRingExtensionEmitted = ext || call.lastRingExtensionEmitted || null;
+                call.lastRingChannelBase = ringChannelBase || null;
+                call.ringAttemptCount = (call.ringAttemptCount || 0) + 1;
+                const instanceKey = ringChannelBase || `attempt-${call.ringAttemptCount}`;
+                return this.buildEmission(
+                    call,
+                    eventName,
+                    `RING:${call.linkedid}:${ext || "unknown"}:${instanceKey}`,
+                    false,
+                    isNewRingTarget ? "ring_extension_update" : "ring_retry_same_extension"
+                );
             }
 
             return this.buildNoop(call, "ring_deduped");
