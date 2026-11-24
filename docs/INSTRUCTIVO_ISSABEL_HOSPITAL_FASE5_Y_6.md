@@ -170,8 +170,9 @@ Ejecutar antes de aprobar el pase a producción:
    * Timbrado inmediato en el Launcher v2 y audio bidireccional claro en navegador (`< 1 s` al contestar).
    * Transferencia entre piloto 1 y piloto 2 sin corte ni llamada fantasma.
    * Rechazo y abandono antes de contestar (`Espera` exacta, `ended_at` lleno, `Hablado = 0s`).
+   * **Convivencia simultánea WhatsApp + Análogo (1-a-1):** si un asesor atiende una llamada de WhatsApp mientras suena la cola `659`, la llamada analógica NO lo interrumpe; apenas cuelga WhatsApp, la cola reintenta sobre su extensión (`AgentRingNoAnswer` + `dedupeKey` por intento de canal) y la llamada timbra de inmediato en EVA.
    * Grabación y transcripción registradas en `Dashboard de llamadas`.
-   * **Cuadre 1-a-1 en `CDR Report` de Issabel (`Destination = 659`):** 1 fila limpia por llamada (`ANSWERED` con la extensión real del asesor o `NO ANSWER`), **`0` filas `FAILED 0s`**, **`0` filas `88xxxxxxxx`**, y estadísticas reales (`C:`/`A:`) en `asterisk -rx "queue show 659"`.
+   * **Cuadre 1-a-1 en `CDR Report` de Issabel (`Destination = 659`):** 1 fila limpia por llamada (`ANSWERED` con la extensión real del asesor o `NO ANSWER`), **`0` filas `FAILED 0s`**, **`0` filas `88xxxxxxxx`**, y estadísticas reales (`C:`/`A:`) en `asterisk -rx "queue show 659"`. *(Nota operativa de Issabel: si se usa el botón `Delete displayed CDR(s)` durante limpieza de pruebas, recargar siempre entrando por el menú izquierdo `Reports ➔ CDR Report` —nunca con `F5`—, porque Chrome reenvía el `POST` de borrado y elimina los CDR nuevos).*
    * **Caja Negra y Dashboard en `/admin`:** `0` rechazos AMI/ARI, `0` errores HTTP 4xx/5xx, y columna **`Canal PBX`** mostrando el canal exacto (`SIP/...` o `DAHDI/...`) con copia rápida y acción **`Colgar`** disponible ante canales pegados.
 
 ---
