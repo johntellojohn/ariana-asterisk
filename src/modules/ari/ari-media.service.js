@@ -31,8 +31,7 @@ if (typeof pbxService.registerActiveExtensionChecker === "function") {
         for (const session of mediaSessionsById.values()) {
             if (session.status !== "closed") {
                 const pausedExt = String(session.pausedAgentExtension || "").trim();
-                const activeId = String(session.activeAgentId || "").trim();
-                if (pausedExt === clean || activeId === clean) {
+                if (pausedExt && pausedExt === clean) {
                     return true;
                 }
             }
@@ -397,15 +396,15 @@ async function startMediaSessionByLinkedId(linkedid, options = {}) {
         mediaSession.updatedAt = new Date().toISOString();
 
         const call = typeof pbxService.getCallByLinkedId === "function" ? pbxService.getCallByLinkedId(targetLinkedid) : null;
-        let agentExt = options.agent_extension || options.agentExtension || options.extension || call?.agentExtension || null;
-        if ((!agentExt || agentExt === call?.queue) && Array.isArray(call?.channels)) {
-            for (const ch of call.channels) {
-                const match = String(ch).match(/Local\/(\d{3,6})@/i);
-                if (match) {
-                    agentExt = match[1];
-                    break;
-                }
-            }
+        let agentExt =
+            options.agent_extension ||
+            options.agentExtension ||
+            options.extension ||
+            call?.answeredExtension ||
+            call?.agentExtension ||
+            null;
+        if (agentExt && String(agentExt).trim() === String(call?.queue || "").trim()) {
+            agentExt = null;
         }
         if (!agentExt && options.agentId && String(options.agentId).length >= 3) {
             agentExt = String(options.agentId);
@@ -725,26 +724,37 @@ async function closeMediaSession(idOrLinkedid, reason = "closed") {
     if (session.pausedAgentExtension && typeof pbxService.pauseQueueMember === "function") {
         const agentExt = session.pausedAgentExtension;
         const queue = session.pausedQueue || "650";
-        pbxService.pauseQueueMember({
-            extension: agentExt,
-            paused: false,
-            reason: "available",
-            queue,
-        })
-            .then(() => {
-                console.log("[ari:media] agent unpaused in queue after call closed", {
-                    agentExt,
-                    queue,
-                    linkedid: session.linkedid,
-                });
-            })
-            .catch((err) => {
-                console.warn("[ari:media] failed to unpause agent in queue", {
-                    agentExt,
-                    error: err.message,
-                });
-            });
         session.pausedAgentExtension = null;
+
+        let stillInAnotherSession = false;
+        for (const other of mediaSessionsById.values()) {
+            if (other !== session && other.status !== "closed" && String(other.pausedAgentExtension || "").trim() === agentExt) {
+                stillInAnotherSession = true;
+                break;
+            }
+        }
+
+        if (!stillInAnotherSession) {
+            pbxService.pauseQueueMember({
+                extension: agentExt,
+                paused: false,
+                reason: "available",
+                queue,
+            })
+                .then(() => {
+                    console.log("[ari:media] agent unpaused in queue after call closed", {
+                        agentExt,
+                        queue,
+                        linkedid: session.linkedid,
+                    });
+                })
+                .catch((err) => {
+                    console.warn("[ari:media] failed to unpause agent in queue", {
+                        agentExt,
+                        error: err.message,
+                    });
+                });
+        }
     }
 
     return snapshotMediaSession(session);

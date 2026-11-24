@@ -1939,17 +1939,19 @@ function ensureAmiInstance() {
 }
 
 async function pauseQueueMember(arg1, arg2, arg3, arg4) {
-    let extension, paused, reason, queue;
+    let extension, paused, reason, queue, force;
     if (arg1 && typeof arg1 === "object" && !Array.isArray(arg1)) {
         extension = arg1.extension;
         paused = arg1.paused ?? true;
         reason = arg1.reason || "";
         queue = arg1.queue || "";
+        force = Boolean(arg1.force);
     } else {
         extension = arg1;
         paused = arg2 ?? true;
         reason = arg3 || "";
         queue = arg4 || "";
+        force = false;
     }
 
     validateRequired({ extension });
@@ -1957,55 +1959,48 @@ async function pauseQueueMember(arg1, arg2, arg3, arg4) {
 
     const cleanExt = extractExtensionNumber(extension) || String(extension).trim();
     const isPaused = Boolean(paused);
-    const pauseFlag = isPaused ? "1" : "0";
     const pauseReason = String(reason || (isPaused ? "paused_by_eva" : "available")).trim();
-
-    console.log("[pbx:queue] queue pause requested", {
-        extension: cleanExt,
-        paused: isPaused,
-        reason: pauseReason,
-        queue: queue || "all",
-    });
-
     const targetQueue = String(queue || "650").trim();
-    if (!queuePresence.getKnownInterface(targetQueue, cleanExt)) {
-        try {
-            const snapshot = await getQueueStatus(targetQueue, { timeoutMs: 1200 });
-            queuePresence.recordDiscoveredMembers(targetQueue, snapshot);
-        } catch (_) {
-            // Fallback gracefully to static interface candidates
-        }
-    }
 
-    const result = await queuePresence.pauseMemberWithDiscovery({
+    const result = await queuePresence.setMemberPaused({
         queue: targetQueue,
         extension: cleanExt,
         paused: isPaused,
         reason: pauseReason,
+        force,
         runAmiAction,
+        fetchQueueStatus: (q) => getQueueStatus(q, { timeoutMs: 1200 }),
     });
 
-    if (result.ok) {
-        const stateSig = `${isPaused ? "1" : "0"}:${pauseReason || (isPaused ? "paused_by_eva" : "online_eva")}`;
-        queuePresence.stateByKey.set(`${targetQueue}:${cleanExt}`, stateSig);
+    if (!result.skipped) {
+        console.log("[pbx:queue] queue pause applied", {
+            extension: cleanExt,
+            paused: isPaused,
+            reason: pauseReason,
+            queue: targetQueue,
+            ok: Boolean(result.ok),
+            interface: result.interface || null,
+        });
     }
 
     const results = result.ok
-        ? [{ interface: result.interface, ok: true, response: result.response }]
+        ? [{ interface: result.interface || null, ok: true, skipped: Boolean(result.skipped), response: result.response }]
         : (result.attempts || []).map((a) => ({ interface: a.interface, ok: false, error: a.error }));
 
-    try {
-        await runAmiAction({
-            Action: "DBPut",
-            Family: "eva_presence",
-            Key: cleanExt,
-            Val: isPaused ? "0" : "1",
-        });
-    } catch (dbErr) {
-        console.warn("[pbx:queue] DBPut eva_presence failed", {
-            extension: cleanExt,
-            error: dbErr.message,
-        });
+    if (!result.skipped && result.ok) {
+        try {
+            await runAmiAction({
+                Action: "DBPut",
+                Family: "eva_presence",
+                Key: cleanExt,
+                Val: isPaused ? "0" : "1",
+            });
+        } catch (dbErr) {
+            console.warn("[pbx:queue] DBPut eva_presence failed", {
+                extension: cleanExt,
+                error: dbErr.message,
+            });
+        }
     }
 
     return {
@@ -2013,6 +2008,7 @@ async function pauseQueueMember(arg1, arg2, arg3, arg4) {
         paused: isPaused,
         reason: pauseReason,
         queue: queue || "all",
+        skipped: Boolean(result.skipped),
         results,
     };
 }
@@ -2024,6 +2020,8 @@ function registerActiveExtensionChecker(fn) {
         activeExtensionChecker = fn;
     }
 }
+
+const TERMINAL_CALL_STATES = new Set(["ENDED", "ABANDONED", "CANCELLED", "NOANSWER", "BUSY", "FAILED"]);
 
 function isExtensionBusyLocally(extension) {
     const clean = extractExtensionNumber(extension);
@@ -2037,25 +2035,16 @@ function isExtensionBusyLocally(extension) {
         } catch (_) {}
     }
 
-    const now = Date.now();
-    for (const call of callsByLinkedId.values()) {
-        const status = String(call.status || "").toUpperCase();
-        if (status === "ANSWER" || status === "ANSWERED" || status === "RINGING" || status === "IN_PROGRESS") {
-            const eventAgeMs = call.lastEventTime ? (now - new Date(call.lastEventTime).getTime()) : Infinity;
-            if (eventAgeMs > 60000) {
-                continue;
-            }
-
-            if (call.agentExtension && extractExtensionNumber(call.agentExtension) === clean) {
-                return true;
-            }
-            if (Array.isArray(call.channels)) {
-                for (const ch of call.channels) {
-                    if (String(ch).includes(`/${clean}@`) || String(ch).includes(`/${clean}-`)) {
-                        return true;
-                    }
-                }
-            }
+    for (const call of callState.getAllCalls()) {
+        if (!call || TERMINAL_CALL_STATES.has(String(call.status || "").toUpperCase())) {
+            continue;
+        }
+        if (call.status !== "ANSWERED" && !call.answered) {
+            continue;
+        }
+        const answeredExt = extractExtensionNumber(call.answeredExtension);
+        if (answeredExt && answeredExt === clean) {
+            return true;
         }
     }
 

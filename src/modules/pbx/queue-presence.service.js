@@ -7,6 +7,23 @@ class QueuePresenceService {
         this.stateByKey = new Map();
         this.interfaceByKey = new Map();
         this.lastDiscoveryAtByQueue = new Map();
+        this.lockByKey = new Map();
+    }
+
+    withExtensionLock(cacheKey, fn) {
+        const previous = this.lockByKey.get(cacheKey) || Promise.resolve();
+        const next = previous
+            .catch(() => {})
+            .then(() => fn());
+
+        const cleanup = next.finally(() => {
+            if (this.lockByKey.get(cacheKey) === cleanup) {
+                this.lockByKey.delete(cacheKey);
+            }
+        });
+
+        this.lockByKey.set(cacheKey, cleanup);
+        return next;
     }
 
     static extractExtension(value) {
@@ -59,6 +76,14 @@ class QueuePresenceService {
                     this.stateByKey.delete(key);
                 }
                 this.interfaceByKey.set(key, iface);
+
+                const rawPaused = item.paused ?? item.Paused;
+                if (rawPaused !== undefined && rawPaused !== null && String(rawPaused).trim() !== "") {
+                    const normalizedPaused = String(rawPaused).trim().toLowerCase();
+                    const actualPaused = rawPaused === true || normalizedPaused === "1" || normalizedPaused === "true";
+                    this.stateByKey.set(key, actualPaused ? "1" : "0");
+                }
+
                 updated += 1;
             }
         }
@@ -120,6 +145,66 @@ class QueuePresenceService {
         };
     }
 
+    async setMemberPaused({
+        queue = "650",
+        extension,
+        paused,
+        reason = "",
+        force = false,
+        runAmiAction,
+        fetchQueueStatus = null,
+    }) {
+        const cleanQueue = String(queue || "650").trim();
+        const cleanExt = QueuePresenceService.extractExtension(extension);
+
+        if (!cleanExt) {
+            return { ok: false, skipped: true, reason: "invalid_extension" };
+        }
+
+        const isPaused = Boolean(paused);
+        const cacheKey = `${cleanQueue}:${cleanExt}`;
+        const desiredFlag = isPaused ? "1" : "0";
+
+        return this.withExtensionLock(cacheKey, async () => {
+            const prevFlag = this.stateByKey.get(cacheKey);
+            if (!force && prevFlag === desiredFlag) {
+                return {
+                    ok: true,
+                    skipped: true,
+                    paused: isPaused,
+                    interface: this.interfaceByKey.get(cacheKey) || null,
+                };
+            }
+
+            if (!this.interfaceByKey.has(cacheKey) && typeof fetchQueueStatus === "function") {
+                try {
+                    const snapshot = await fetchQueueStatus(cleanQueue);
+                    this.recordDiscoveredMembers(cleanQueue, snapshot);
+                } catch (_err) {
+                    // Fallback gracefully to static interface candidates
+                }
+            }
+
+            const res = await this.pauseMemberWithDiscovery({
+                queue: cleanQueue,
+                extension: cleanExt,
+                paused: isPaused,
+                reason,
+                runAmiAction,
+            });
+
+            if (res.ok) {
+                this.stateByKey.set(cacheKey, desiredFlag);
+            }
+
+            return {
+                ...res,
+                skipped: false,
+                paused: isPaused,
+            };
+        });
+    }
+
     async syncDelta({
         queue = "650",
         onlineExtensions = [],
@@ -146,7 +231,7 @@ class QueuePresenceService {
             allSet.add(ext);
         }
 
-        // Refresh member interface mapping via QueueStatus if stale (> 5 min) or unknown
+        // Refresh member interface mapping & live paused flags via QueueStatus if stale (> 5 min) or unknown
         const lastDiscovery = this.lastDiscoveryAtByQueue.get(cleanQueue) || 0;
         if (typeof fetchQueueStatus === "function" && Date.now() - lastDiscovery > 5 * 60 * 1000) {
             try {
@@ -162,49 +247,52 @@ class QueuePresenceService {
         let skippedCount = 0;
 
         for (const ext of allSet) {
-            const busy = Boolean(isExtensionBusy(ext));
-            const desiredOnline = onlineSet.has(ext) && !busy;
-            const desiredPaused = !desiredOnline;
-            const reason = desiredOnline ? "online_eva" : busy ? "in_call_eva" : "offline_eva";
-
             const stateKey = `${cleanQueue}:${ext}`;
-            const nextStateSignature = `${desiredPaused ? "1" : "0"}:${reason}`;
-            const prevSignature = this.stateByKey.get(stateKey);
+            const entry = await this.withExtensionLock(stateKey, async () => {
+                const busy = Boolean(isExtensionBusy(ext));
+                const desiredOnline = onlineSet.has(ext) && !busy;
+                const desiredPaused = !desiredOnline;
+                const reason = desiredOnline ? "online_eva" : busy ? "in_call_eva" : "offline_eva";
 
-            if (!force && prevSignature === nextStateSignature) {
-                skippedCount += 1;
-                results.push({
+                const desiredFlag = desiredPaused ? "1" : "0";
+                const prevFlag = this.stateByKey.get(stateKey);
+
+                if (!force && prevFlag === desiredFlag) {
+                    skippedCount += 1;
+                    return {
+                        extension: ext,
+                        isOnline: desiredOnline,
+                        paused: desiredPaused,
+                        skipped: true,
+                        ok: true,
+                    };
+                }
+
+                const res = await this.pauseMemberWithDiscovery({
+                    queue: cleanQueue,
+                    extension: ext,
+                    paused: desiredPaused,
+                    reason,
+                    runAmiAction,
+                });
+
+                if (res.ok) {
+                    this.stateByKey.set(stateKey, desiredFlag);
+                    changedCount += 1;
+                }
+
+                return {
                     extension: ext,
                     isOnline: desiredOnline,
                     paused: desiredPaused,
-                    skipped: true,
-                    ok: true,
-                });
-                continue;
-            }
-
-            const res = await this.pauseMemberWithDiscovery({
-                queue: cleanQueue,
-                extension: ext,
-                paused: desiredPaused,
-                reason,
-                runAmiAction,
+                    skipped: false,
+                    ok: res.ok,
+                    interface: res.interface || null,
+                    error: res.error || null,
+                };
             });
 
-            if (res.ok) {
-                this.stateByKey.set(stateKey, nextStateSignature);
-                changedCount += 1;
-            }
-
-            results.push({
-                extension: ext,
-                isOnline: desiredOnline,
-                paused: desiredPaused,
-                skipped: false,
-                ok: res.ok,
-                interface: res.interface || null,
-                error: res.error || null,
-            });
+            results.push(entry);
         }
 
         return {
