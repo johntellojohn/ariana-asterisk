@@ -12,7 +12,7 @@
 > **⚠️ Regla operativa:** **NO actualizar ni tocar la versión de Issabel 4 / Asterisk 13.30.0 en producción del Hospital** (CentOS 7 está en EOL; intentar subir a Asterisk 16/18 in-place rompe dependencias y dialplans, y migrar a Issabel 5 exige servidor nuevo con migración manual de contextos custom y cambio de puertos `5060`/`5066`).
 
 1. **Modos compatibles sobre `Asterisk 13.30.0` (según Fase 4B):**
-   * **Plan A — Navegador Chrome EVA sin softphone (`sip_bridge`, en certificación previa en Lab VM `13.22.0`):** `ariana-asterisk` conecta AMI directo al Issabel `13.30.0` y usa un contenedor satélite ligero (`asterisk-media-bridge` headless en nuestra caja Docker LAN) mediante 1 peer SIP interno (`< 1 ms` en LAN) para sacar audio por WebSocket hacia EVA.
+   * **Plan A — Navegador Chrome EVA sin softphone (`sip_bridge`, certificado en vivo en Lab VM `13.22.0`):** `ariana-asterisk` conecta AMI directo al Issabel `13.30.0` y usa un contenedor satélite ligero (`asterisk-media-bridge` headless en nuestra caja Docker LAN) mediante 1 peer SIP interno (`< 1 ms` en LAN, puerto `5080`) para sacar audio por WebSocket hacia EVA (`< 1 s` desde clic en contestar) manteniendo estadísticas nativas de cola y CDR 1-a-1 en Issabel.
    * **Plan B — Respaldo 0 riesgo / Teléfono IP, `MicroSIP` o `Zoiper` (`TRUNK_ANSWER_MODE=extension`):** audio SIP nativo en el Issabel `13.30.0` (`0 ms` delay); EVA controla toda la pantalla del agente, ficha CRM, estado automático `EN_LINEA` ↔ `OCUPADO` y pausas en Cola.
    * **En futuros clientes con `Asterisk 16.6+ / 18+ / 20+` (ej. Issabel 5):** se usa **`ari_media`** directo por `/ari/channels/externalMedia` sin `sip_bridge`.
 2. **Servidor / Mini-PC en la LAN del Hospital (para `ariana-asterisk v2`):**
@@ -22,15 +22,16 @@
 3. **Conectividad, SSL y Firewall:**
    * Dominio o DDNS con certificado SSL válido apuntando al gateway (`PUBLIC_BASE_URL`, ej. `https://pbx-hospital.dominio.com:366`) para que Chrome de los asesores abra `wss://.../366` sin bloqueos de certificado.
    * Puertos requeridos:
-     * **LAN hacia Issabel:** TCP `5038` (AMI), TCP `8088` (ARI HTTP/WS), UDP `5060` (si se usa `sip_bridge` local) y UDP `46000-46200` (RTP bidireccional en LAN).
-     * **Navegadores / EVA Cloud hacia Gateway:** TCP `366` (HTTPS/WSS con `nginx` proxy hacia `127.0.0.1:3002`).
+     * **Gateway ➔ Issabel (LAN):** TCP `5038` (AMI), TCP `8088` (ARI HTTP/WS) y UDP `10000-20000` (RTP hacia Issabel).
+     * **Issabel ➔ Gateway (LAN, Plan A `sip_bridge`):** UDP/TCP `5080` (peer SIP `[ariana-bridge-sip]`) y UDP `18000-18060` + `46000-46200` (RTP bidireccional del bridge).
+     * **Navegadores / EVA Cloud hacia Gateway:** TCP `366` (HTTPS/WSS con `nginx` proxy hacia `api:3002`; en `nginx/conf/default.conf` usar `resolver 127.0.0.11 valid=10s ipv6=off;` o reiniciar `ariana-asterisk-ssl` tras reconstruir `api` para evitar `502`).
      * **Gateway hacia EVA Cloud:** salida HTTPS `443` saliente (webhooks + heartbeat).
 
 ---
 
-## 2. Instructivo para el Administrador del Issabel (4 Bloques Cerrados — Fase 5.2)
+## 2. Instructivo para el Administrador del Issabel (Bloques A–D + Bloque E `sip_bridge` — Fase 5.2)
 
-> Aplicar únicamente estos 4 bloques. **No tocar la Cola `650` ni las rutas actuales de IVR** durante Fase 5.
+> Aplicar únicamente estos bloques. **No tocar la Cola `650` ni las rutas actuales de IVR** durante Fase 5.
 
 ### Bloque A — `/etc/asterisk/http.conf`
 ```ini
@@ -142,20 +143,22 @@ write = system,call,log,verbose,command,agent,user,config,originate,reporting
 1. Clonar/actualizar `ariana-asterisk` en `main` en el servidor LAN:
    ```bash
    cp .env.client.example .env
-   # Editar CONFIG_MASTER_KEY y ADMIN_BOOTSTRAP_PASSWORD en .env
+   # Editar CONFIG_MASTER_KEY, ADMIN_BOOTSTRAP_PASSWORD y SIP_BRIDGE_PUBLIC_IP (IP LAN del servidor Docker) en .env
    mkdir -p ./data ./logs
-   docker compose up -d --build
+   docker compose -f docker-compose.yml -f docker-compose.ssl.yml up -d --build && docker restart ariana-asterisk-ssl
    ```
-2. Entrar a `https://PUBLIC_BASE_URL/admin` desde el navegador, iniciar sesión y completar:
+2. Entrar a `https://PUBLIC_BASE_URL/admin` desde el navegador, iniciar sesión, **cambiar la contraseña temporal inicial** (en **Configuración PBX / EVA ➔ Credenciales Administrativas**) y completar:
    * **EVA Destino:** `LARAVEL_API_URL` (`https://sigcrm.pro` o dominio EVA Cloud), `LARAVEL_TENANT_DATABASE` (BD del tenant), `LARAVEL_API_TOKEN` / `ASTERISK_API_TOKEN` (token de `integracions` código `TRUNCAL`), `PUBLIC_BASE_URL`.
-   * **Issabel Local:** IP LAN de Issabel, AMI `5038` + `[middleware]`, ARI `http://IP_ISSABEL:8088` + `[ariana]`, `ARI_APP_NAME=ariana-trunk`, Contexto `ariana-ari`, Cola `659` (en Fase 5) ➔ luego `650` (en Fase 6), RTP `46000-46200`.
+   * **Issabel Local:** IP LAN de Issabel, AMI `5038` + `[middleware]`, ARI `http://IP_ISSABEL:8088` + `[ariana]`, `ARI_APP_NAME=ariana-trunk`, Contexto `ariana-ari`, Cola `659` (en Fase 5) ➔ luego `650` (en Fase 6), RTP `46000-46200` y sección **SIP Media Bridge** habilitada (`sip_bridge` / `auto`).
    * Clic en **Guardar y Reconectar en Caliente**.
-3. En `/admin` ➔ **Diagnóstico en 1 Clic**, confirmar los **4 checks en verde**:
-   * AMI Login OK
-   * ARI WebSocket OK (`ariana-trunk`)
-   * `QueueStatus` devolviendo miembros reales de la cola
+3. En `/admin` ➔ **Diagnóstico en 1 Clic**, confirmar todos los checks en verde:
+   * Configuración persistente `./data` OK
+   * AMI Login + `QueueStatus` devolviendo miembros reales de la cola
+   * ARI WebSocket OK (`ariana-trunk`) + versión Asterisk detectada
    * `POST` test hacia EVA Cloud `200 OK`
-4. En EVA Cloud ➔ **Dashboard de llamadas** confirmar la barra **Gateway Issabel** en verde (`AMI OK · ARI OK · Outbox 0 · RAM RSS MB`).
+   * Almacenamiento `./data`, Outbox (`0` pendientes) y RTP OK
+   * **SIP Media Bridge** conectado (`Asterisk 20`, contexto `ariana-sip-bridge`)
+4. En EVA Cloud ➔ **Dashboard de llamadas** confirmar la barra **Gateway Issabel** en verde (`AMI OK · ARI OK · Bridge SIP: OK · Outbox 0 · RAM RSS MB`).
 
 ---
 
@@ -164,11 +167,12 @@ write = system,call,log,verbose,command,agent,user,config,originate,reporting
 Ejecutar antes de aprobar el pase a producción:
 1. Llamar desde 2–3 celulares externos reales hacia el DID / opción oculta que apunta a la cola espejo `659`.
 2. Verificar en EVA con 1–2 asesores piloto:
-   * Timbrado inmediato en el Launcher y audio bidireccional claro en navegador.
+   * Timbrado inmediato en el Launcher v2 y audio bidireccional claro en navegador (`< 1 s` al contestar).
    * Transferencia entre piloto 1 y piloto 2 sin corte ni llamada fantasma.
-   * Abandono antes de contestar (`Espera` exacta, `ended_at` lleno, `Hablado = 0s`).
+   * Rechazo y abandono antes de contestar (`Espera` exacta, `ended_at` lleno, `Hablado = 0s`).
    * Grabación y transcripción registradas en `Dashboard de llamadas`.
-   * Revisar **Caja Negra** en `/admin` (`0` rechazos AMI/ARI, `0` errores HTTP 4xx/5xx).
+   * **Cuadre 1-a-1 en `CDR Report` de Issabel (`Destination = 659`):** 1 fila limpia por llamada (`ANSWERED` con la extensión real del asesor o `NO ANSWER`), **`0` filas `FAILED 0s`**, **`0` filas `88xxxxxxxx`**, y estadísticas reales (`C:`/`A:`) en `asterisk -rx "queue show 659"`.
+   * **Caja Negra y Dashboard en `/admin`:** `0` rechazos AMI/ARI, `0` errores HTTP 4xx/5xx, y columna **`Canal PBX`** mostrando el canal exacto (`SIP/...` o `DAHDI/...`) con copia rápida y acción **`Colgar`** disponible ante canales pegados.
 
 ---
 
@@ -187,8 +191,8 @@ Si ocurre una falla física de red/audio o incidente bloqueante durante el pase:
 
 ### 5.3. Monitoreo 72 Horas y Replicación ("Cliente X")
 * **Monitoreo 72 h (EVA Cloud + `/admin`):**
-  * Revisar cada día en **Dashboard de llamadas** la barra de **Salud Gateway**: `Gateway En línea`, `AMI OK`, `ARI OK`, `Outbox 0`, `RAM RSS` estable (`< 150 MB`) y `Latencia webhook` normal (`< 400 ms`).
-  * Comparar total de entrantes vs. atendidas/abandonadas y revisar `/app/data/audit/YYYY-MM-DD.jsonl` en `/admin`.
+  * Revisar cada día en **Dashboard de llamadas** la barra de **Salud Gateway**: `Gateway En línea`, `AMI OK`, `ARI OK`, `Bridge SIP: OK`, `Outbox 0`, `RAM RSS` estable (`< 150 MB`) y `Latencia webhook` normal (`< 400 ms`).
+  * Comparar total de entrantes vs. atendidas/abandonadas entre `CDR Report` de Issabel (`Destination = 650`) y EVA `/dashboard-calls`, y revisar `/app/data/audit/events-YYYY-MM-DD.jsonl` en `/admin` (incluyendo búsqueda por **`Canal PBX`** ante cualquier incidencia).
 * **Replicación estándar "Cliente X":**
   * Misma imagen Docker `ariana-asterisk` (`main`), mismo `.env.client.example` de 6 variables, mismo volumen `./data:/app/data`, y alta guiada desde `/admin` + Diagnóstico en 1 Clic.
 
