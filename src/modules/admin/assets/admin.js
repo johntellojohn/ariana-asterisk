@@ -81,8 +81,11 @@
       fields: [
         { key: "trunkAiEnabled", label: "Habilitar Agente IA", type: "checkbox" },
         { key: "openaiApiKey", label: "OpenAI API Key", type: "password" },
+        { key: "openaiRealtimeModel", label: "Modelo OpenAI Realtime", type: "text" },
+        { key: "openaiRealtimeVoice", label: "Voz OpenAI Realtime", type: "text" },
         { key: "callRecordingEnabled", label: "Grabación de Llamadas", type: "checkbox" },
         { key: "callRecordingTranscribe", label: "Transcribir Audio", type: "checkbox" },
+        { key: "callRecordingAnalyze", label: "Analizar Grabación con IA", type: "checkbox" },
       ],
     },
     {
