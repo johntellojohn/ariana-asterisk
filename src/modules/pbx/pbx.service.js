@@ -827,6 +827,8 @@ async function redirectCallToContext(linkedid, target = {}) {
     const priority = Number(target.priority || 1) || 1;
     const actionPrefix = String(target.actionPrefix || "redirect_stasis").trim() || "redirect_stasis";
     const logLabel = String(target.logLabel || "ARI Stasis").trim() || "ARI Stasis";
+    const preferAgentLeg = Boolean(target.preferAgentLeg);
+    const preferredExtension = String(target.preferredExtension || "").trim();
 
     validateRequired({ linkedid, context, extension });
     ensureReady();
@@ -836,11 +838,14 @@ async function redirectCallToContext(linkedid, target = {}) {
         context,
         extension,
         priority,
+        ...(preferAgentLeg ? { preferAgentLeg: true, preferredExtension: preferredExtension || null } : {}),
     });
     rememberAction(linkedid, `${actionPrefix}_requested`, {
         context,
         extension,
         priority,
+        preferAgentLeg,
+        preferredExtension: preferredExtension || null,
     });
 
     const targetLinkedid = String(linkedid || "").trim();
@@ -877,19 +882,54 @@ async function redirectCallToContext(linkedid, target = {}) {
         }
     }
 
-    const channel = primaryCallChannel(call);
+    const primaryChannel = primaryCallChannel(call);
+    const agentLeg = preferAgentLeg ? activeWebAgentLegChannel(call, preferredExtension) : null;
+    let channel = "";
+    let redirectMode = "caller_leg";
+    let response = null;
 
-    if (!channel) {
-        const error = new Error(`PBX call has no tracked channel to redirect to ${logLabel}`);
-        error.status = 409;
-        throw error;
+    if (agentLeg?.channel) {
+        try {
+            response = await redirectChannel(agentLeg.channel, {
+                context,
+                extension,
+                priority,
+            });
+            channel = agentLeg.channel;
+            redirectMode = "agent_leg";
+            console.log(`[pbx:action] redirected web-agent leg to ${logLabel}`, {
+                linkedid,
+                channel,
+                agentExtension: agentLeg.extension,
+                context,
+                extension,
+            });
+        } catch (agentRedirectError) {
+            console.warn(`[pbx:action] web-agent leg redirect failed; falling back to caller channel`, {
+                linkedid,
+                agentChannel: agentLeg.channel,
+                primaryChannel: primaryChannel || null,
+                message: agentRedirectError.message,
+            });
+        }
     }
 
-    const response = await redirectChannel(channel, {
-        context,
-        extension,
-        priority,
-    });
+    if (!response) {
+        channel = primaryChannel;
+
+        if (!channel) {
+            const error = new Error(`PBX call has no tracked channel to redirect to ${logLabel}`);
+            error.status = 409;
+            throw error;
+        }
+
+        response = await redirectChannel(channel, {
+            context,
+            extension,
+            priority,
+        });
+        redirectMode = "caller_leg";
+    }
 
     call.answered = true;
     call.status = "ANSWER";
@@ -897,6 +937,9 @@ async function redirectCallToContext(linkedid, target = {}) {
 
     rememberAction(linkedid, `${actionPrefix}_sent`, {
         channel,
+        primaryChannel: primaryChannel || null,
+        redirectMode,
+        agentExtension: agentLeg?.extension || null,
         context,
         extension,
         priority,
@@ -906,6 +949,9 @@ async function redirectCallToContext(linkedid, target = {}) {
     return {
         linkedid,
         channel,
+        primaryChannel: primaryChannel || null,
+        redirectMode,
+        agentExtension: agentLeg?.extension || null,
         context,
         extension,
         priority,
@@ -923,14 +969,113 @@ function redirectCallToStasis(linkedid) {
     });
 }
 
-function redirectCallToBridge(linkedid, bridgeToken, dialContext = env.sipBridgeDialContext) {
+function redirectCallToBridge(linkedid, bridgeToken, dialContext = env.sipBridgeDialContext, options = {}) {
     return redirectCallToContext(linkedid, {
         context: dialContext || "ariana-sip-bridge",
         extension: bridgeToken,
         priority: 1,
         actionPrefix: "redirect_stasis",
         logLabel: "SIP Media Bridge",
+        preferAgentLeg: options.preferAgentLeg !== false,
+        preferredExtension: options.agentExtension || options.extension || "",
     });
+}
+
+/**
+ * Finds the currently active @ariana-web-agent Local/;2 execution leg for a ringing
+ * queue call. Redirecting the `;2` leg to [ariana-sip-bridge] lets Asterisk app_queue
+ * register a real AgentConnect + single ANSWERED CDR row on Queue 650 (instead of
+ * abandoning the queue and opening a second bridge CDR row).
+ */
+function activeWebAgentLegChannel(call, preferredExtension = "") {
+    if (!call) {
+        return null;
+    }
+
+    const events = Array.isArray(call.events) ? call.events : [];
+    const hungupChannels = new Set();
+    const endedDialChannels = new Set();
+
+    for (const ev of events) {
+        const name = String(ev?.event || "").toLowerCase();
+        const ch = String(ev?.channel || "").trim();
+        const dest = String(ev?.destChannel || "").trim();
+
+        if (name === "hangup" && ch) {
+            hungupChannels.add(ch);
+        }
+        if (name === "dialend" && dest && String(ev?.dialStatus || "").toUpperCase() !== "ANSWER") {
+            endedDialChannels.add(dest);
+        }
+    }
+
+    const cleanPreferred = String(preferredExtension || "").trim();
+    const parseCandidate = (rawChannel) => {
+        const ch = String(rawChannel || "").trim();
+        const match = ch.match(/^(Local\/(\d{2,6})@ariana-web-agent-[^;]+);([12])$/i);
+        if (!match) {
+            return null;
+        }
+        const base = match[1];
+        const ext = match[2];
+        const leg1 = `${base};1`;
+        const leg2 = `${base};2`;
+
+        if (
+            hungupChannels.has(leg1) ||
+            hungupChannels.has(leg2) ||
+            endedDialChannels.has(leg1) ||
+            endedDialChannels.has(leg2)
+        ) {
+            return null;
+        }
+
+        return {
+            channel: leg2,
+            ringChannel: leg1,
+            extension: ext,
+        };
+    };
+
+    const candidates = [];
+    const seen = new Set();
+
+    // Scan events newest-first so we always pick the latest live ring leg
+    for (let i = events.length - 1; i >= 0; i -= 1) {
+        const ev = events[i];
+        const name = String(ev?.event || "").toLowerCase();
+        if (!["agentcalled", "dialbegin"].includes(name)) {
+            continue;
+        }
+        const parsed = parseCandidate(ev?.destChannel);
+        if (parsed && !seen.has(parsed.channel)) {
+            seen.add(parsed.channel);
+            candidates.push(parsed);
+        }
+    }
+
+    // Fallback: scan tracked channels newest-first
+    const channels = Array.isArray(call.channels) ? call.channels : [];
+    for (let i = channels.length - 1; i >= 0; i -= 1) {
+        const parsed = parseCandidate(channels[i]);
+        if (parsed && !seen.has(parsed.channel)) {
+            seen.add(parsed.channel);
+            candidates.push(parsed);
+        }
+    }
+
+    if (candidates.length === 0) {
+        return null;
+    }
+
+    if (cleanPreferred) {
+        const exact = candidates.find((item) => item.extension === cleanPreferred);
+        if (exact) {
+            return exact;
+        }
+    }
+
+    return candidates[0];
 }
 
 function primaryCallChannel(call) {
@@ -2379,6 +2524,7 @@ module.exports = {
         updateCallSummary,
         collectQueueStatusFromAmi,
         primaryCallChannel,
+        activeWebAgentLegChannel,
         setAmiAsteriskVersionForTest(raw) {
             amiAsteriskRawVersion = raw || null;
             amiAsteriskDetectedAt = raw ? new Date().toISOString() : null;

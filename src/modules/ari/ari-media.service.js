@@ -288,6 +288,9 @@ async function startMediaSessionByLinkedId(linkedid, options = {}) {
     }
 
     if (useSipBridge && (!baseSession || !baseSession.inStasis)) {
+        const preferredAgentExt = String(
+            options.agentExtension || options.agent_extension || options.extension || ""
+        ).trim();
         bridgeToken = ariBridgeService.registerBridgeToken(targetLinkedid, {
             agentId: options.agentId || null,
         });
@@ -295,8 +298,11 @@ async function startMediaSessionByLinkedId(linkedid, options = {}) {
             targetLinkedid,
             bridgeToken,
             dialContext: env.sipBridgeDialContext,
+            agentExtension: preferredAgentExt || null,
         });
-        const redirectOutcome = await redirectTrackedCallToSipBridge(targetLinkedid, bridgeToken);
+        const redirectOutcome = await redirectTrackedCallToSipBridge(targetLinkedid, bridgeToken, {
+            agentExtension: preferredAgentExt || null,
+        });
         redirectedPbxChannel = redirectOutcome.channel;
         baseSession = await waitForAriSession(
             targetLinkedid,
@@ -519,7 +525,7 @@ function registerPbxAliasesForCall(targetLinkedid, extraChannel = null, ariClien
     return Array.from(keys).filter(Boolean);
 }
 
-async function redirectTrackedCall(linkedid, { bridgeToken = null } = {}) {
+async function redirectTrackedCall(linkedid, { bridgeToken = null, agentExtension = null } = {}) {
     const useSipBridge = Boolean(bridgeToken);
     const targetAriClient = useSipBridge ? ariBridgeService : ariService;
     const waitBudget = Number((useSipBridge ? env.sipBridgeWaitMs : env.ariStasisWaitMs) || env.ariStasisWaitMs || 5000);
@@ -529,7 +535,9 @@ async function redirectTrackedCall(linkedid, { bridgeToken = null } = {}) {
 
     try {
         const result = useSipBridge
-            ? await pbxService.redirectCallToBridge(linkedid, bridgeToken, env.sipBridgeDialContext)
+            ? await pbxService.redirectCallToBridge(linkedid, bridgeToken, env.sipBridgeDialContext, {
+                agentExtension: agentExtension || null,
+            })
             : await pbxService.redirectCallToStasis(linkedid);
         const redirectedChannel = result?.channel ? String(result.channel).trim() : null;
         if (redirectedChannel) {
@@ -551,8 +559,11 @@ function redirectTrackedCallToStasis(linkedid) {
     return redirectTrackedCall(linkedid);
 }
 
-function redirectTrackedCallToSipBridge(linkedid, bridgeToken) {
-    return redirectTrackedCall(linkedid, { bridgeToken });
+function redirectTrackedCallToSipBridge(linkedid, bridgeToken, options = {}) {
+    return redirectTrackedCall(linkedid, {
+        bridgeToken,
+        agentExtension: options.agentExtension || null,
+    });
 }
 
 async function waitForAriSession(linkedid, timeoutMs, fallbackKeys = null, ariClient = ariService) {

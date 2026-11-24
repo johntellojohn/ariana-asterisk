@@ -170,6 +170,104 @@ async function run() {
         "QueuePresenceService must include @ariana-web-agent/n interface"
     );
 
+    // 2d. activeWebAgentLegChannel must pick the latest live @ariana-web-agent ;1 -> ;2 twin,
+    // ignore hungup/expired attempts, respect preferredExtension, and return null if none live.
+    const webAgentCall = {
+        linkedid: "1795542740.2441",
+        channels: [
+            "SIP/troncal-hospital-00000101",
+            "Local/101@ariana-web-agent-000000a1;1",
+            "Local/101@ariana-web-agent-000000a1;2",
+            "Local/150@ariana-web-agent-000000b9;1",
+        ],
+        events: [
+            { event: "queuecallerjoin", channel: "SIP/troncal-hospital-00000101" },
+            { event: "agentcalled", channel: "SIP/troncal-hospital-00000101", destChannel: "Local/101@ariana-web-agent-000000a1;1" },
+            { event: "dialend", channel: "SIP/troncal-hospital-00000101", destChannel: "Local/101@ariana-web-agent-000000a1;1", dialStatus: "NOANSWER" },
+            { event: "hangup", channel: "Local/101@ariana-web-agent-000000a1;1" },
+            { event: "hangup", channel: "Local/101@ariana-web-agent-000000a1;2" },
+            { event: "agentcalled", channel: "SIP/troncal-hospital-00000101", destChannel: "Local/150@ariana-web-agent-000000b9;1" },
+            { event: "dialbegin", channel: "SIP/troncal-hospital-00000101", destChannel: "Local/150@ariana-web-agent-000000b9;1" },
+        ],
+    };
+    const pickedLeg = pbxService.__test.activeWebAgentLegChannel(webAgentCall, "150");
+    assert.deepStrictEqual(pickedLeg, {
+        channel: "Local/150@ariana-web-agent-000000b9;2",
+        ringChannel: "Local/150@ariana-web-agent-000000b9;1",
+        extension: "150",
+    });
+
+    // Once the ;2 leg hangs up (e.g. Wait(25) expired), activeWebAgentLegChannel returns null so caller fallback triggers
+    const expiredWebAgentCall = {
+        ...webAgentCall,
+        events: [
+            ...webAgentCall.events,
+            { event: "hangup", channel: "Local/150@ariana-web-agent-000000b9;2" },
+        ],
+    };
+    assert.strictEqual(pbxService.__test.activeWebAgentLegChannel(expiredWebAgentCall, "150"), null);
+
+    // 2e. Real Queue AgentConnect flow (when Local/150@ariana-web-agent;2 answers via [ariana-sip-bridge])
+    // must record answeredExtension = 150, emit single ANSWERED and single ENDED on primary caller hangup.
+    const queueAnswerTracker = new CallStateService();
+    const qaLid = "1795542999.10";
+    queueAnswerTracker.processEvent({
+        event: "queuecallerjoin",
+        linkedid: qaLid,
+        uniqueid: qaLid,
+        channel: "SIP/troncal-hospital-00000202",
+        caller: "0998887766",
+        queue: "650",
+    });
+    queueAnswerTracker.processEvent({
+        event: "agentcalled",
+        linkedid: qaLid,
+        uniqueid: qaLid,
+        channel: "SIP/troncal-hospital-00000202",
+        destChannel: "Local/150@ariana-web-agent-000000c1;1",
+        destExtension: "150",
+        queue: "650",
+    });
+    const dBridgeDialAns = queueAnswerTracker.processEvent({
+        event: "dialend",
+        linkedid: qaLid,
+        channel: "Local/150@ariana-web-agent-000000c1;2",
+        destChannel: "SIP/ariana-bridge-sip-00000033",
+        dialStatus: "ANSWER",
+    });
+    assert.strictEqual(dBridgeDialAns.emit, true);
+    assert.strictEqual(dBridgeDialAns.dedupeKey, `ANSWERED:${qaLid}`);
+
+    const dAgentConnect = queueAnswerTracker.processEvent({
+        event: "agentconnect",
+        linkedid: qaLid,
+        channel: "SIP/troncal-hospital-00000202",
+        destChannel: "Local/150@ariana-web-agent-000000c1;1",
+        memberName: "Local/150@ariana-web-agent/n",
+        queue: "650",
+    });
+    assert.strictEqual(dAgentConnect.emit, false, "AgentConnect after DialEnd ANSWER must dedupe cleanly");
+    assert.strictEqual(dAgentConnect.call.answeredExtension, "150");
+
+    const dAgentLegHangup = queueAnswerTracker.processEvent({
+        event: "hangup",
+        linkedid: qaLid,
+        channel: "Local/150@ariana-web-agent-000000c1;2",
+        cause: "16",
+    });
+    assert.strictEqual(dAgentLegHangup.emit, false);
+    assert.strictEqual(dAgentLegHangup.reason, "subchannel_hangup_ignored");
+
+    const dCallerEnd = queueAnswerTracker.processEvent({
+        event: "hangup",
+        linkedid: qaLid,
+        channel: "SIP/troncal-hospital-00000202",
+        cause: "16",
+    });
+    assert.strictEqual(dCallerEnd.emit, true);
+    assert.strictEqual(dCallerEnd.isTerminal, true);
+    assert.strictEqual(dCallerEnd.call.status, "ENDED");
+
     // 3. Bridge token resolution inside ari-bridge.service
     ariBridgeService.__test.clearTokens();
     const token = ariBridgeService.registerBridgeToken("1795099888.1", { agentId: 7 });
@@ -243,9 +341,10 @@ async function run() {
         });
         ariBridgeService.isAvailable = () => true;
 
-        pbxService.redirectCallToBridge = async (_linkedid, issuedToken, dialContext) => {
+        pbxService.redirectCallToBridge = async (_linkedid, issuedToken, dialContext, redirectOptions = {}) => {
             assert.match(issuedToken, /^88\d{8}$/);
             assert.strictEqual(dialContext, "ariana-sip-bridge");
+            assert.strictEqual(redirectOptions.agentExtension, "150");
             setImmediate(async () => {
                 await ariBridgeService.ingestEventForTest({
                     type: "StasisStart",
@@ -261,7 +360,7 @@ async function run() {
                     },
                 });
             });
-            return { channel: "SIP/trunk-0001", context: dialContext, extension: issuedToken };
+            return { channel: "Local/150@ariana-web-agent-000000c1;2", redirectMode: "agent_leg", context: dialContext, extension: issuedToken };
         };
 
         ariBridgeService.answerCallByLinkedId = async (linkedid) => {
@@ -298,6 +397,7 @@ async function run() {
         const started = await ariMediaService.startMediaSessionByLinkedId(targetLid, {
             owner: "agent",
             agentId: 12,
+            agentExtension: "150",
         });
 
         assert.strictEqual(started.transport, "sip_bridge");

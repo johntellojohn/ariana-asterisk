@@ -226,6 +226,8 @@ async function startCallMediaSession(req, res, next) {
             {
                 owner: "agent",
                 agentId: req.body.agent_id || req.body.agentId || null,
+                agentExtension: req.body.agent_extension || req.body.agentExtension || req.body.extension || null,
+                queue: req.body.queue || null,
                 tenant: req.body.tenant || req.body.database || null,
                 callbackUrl: req.body.callback_url || req.body.callbackUrl || null,
                 direction: req.body.direction || null,

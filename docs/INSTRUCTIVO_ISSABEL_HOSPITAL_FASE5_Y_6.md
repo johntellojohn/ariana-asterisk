@@ -109,16 +109,19 @@ write = system,call,log,verbose,command,agent,user,config,originate,reporting
    ```ini
    [ariana-sip-bridge]
    exten => _X.,1,NoOp(Ariana SIP Media Bridge ${CALLERID(num)} -> ${EXTEN})
+    same => n,ExecIf($["${ARIANA_AGENT_LEG}"="1"]?Set(CDR_PROP(disable)=1))
     same => n,Dial(SIP/ariana-bridge-sip/${EXTEN},60)
     same => n,Hangup()
 
    [ariana-web-agent]
    exten => _X.,1,NoOp(Ariana Web Agent Ring ext ${EXTEN} caller ${CALLERID(num)})
+    same => n,Set(__ARIANA_AGENT_LEG=1)
+    same => n,Set(CDR_PROP(disable)=1)
     same => n,Ringing()
     same => n,Wait(25)
     same => n,Hangup()
    ```
-   *(Para timbrar en EVA sin softphone instalado, registrar miembro en cola como `Local/101@ariana-web-agent/n,0,Nombre Agente` o mantener `SIP/101` en modo Mixto).*
+   *(Para timbrar en EVA sin softphone instalado, registrar miembro en cola como `Local/101@ariana-web-agent/n,0,Nombre Agente` o mantener `SIP/101` en modo Mixto. Al desactivar el CDR en la pata virtual `;2` y redirigir dicha pata al contestar en EVA, Issabel registra **1 sola fila CDR limpia por llamada** en `Destination = 650` —`ANSWERED` con la extensión real del agente o `NO ANSWER`—, **0 filas `FAILED 0s`** y estadísticas reales `C:/A:` en `queue show 650` para cuadrar 1 a 1 con EVA).*
 
 4. Recargar módulos en Issabel **sin cortar llamadas activas**:
    ```bash
