@@ -13,6 +13,7 @@ process.env.ARI_EXTERNAL_MEDIA_PORT_END = "46180";
 process.env.TRUNK_HUMAN_DISCONNECT_TONE_ENABLED = "false";
 
 const ariService = require("../src/modules/ari/ari.service");
+const { createAriClient } = require("../src/modules/ari/ari-client.factory");
 const ariMediaService = require("../src/modules/ari/ari-media.service");
 const { attachAriWebSocketServer } = require("../src/modules/ari/ari.websocket");
 const {
@@ -230,10 +231,65 @@ async function testWebSocketCodecNegotiation() {
     }
 }
 
+async function testAriHangupReasonNormalization() {
+    const receivedReasons = [];
+    const mockAri = http.createServer((req, res) => {
+        const parsed = new URL(req.url, "http://127.0.0.1");
+        if (req.method === "DELETE" && parsed.pathname.startsWith("/ari/channels/")) {
+            receivedReasons.push(parsed.searchParams.get("reason"));
+            res.statusCode = 204;
+            res.end();
+            return;
+        }
+        res.statusCode = 404;
+        res.end();
+    });
+
+    await new Promise((resolve) => mockAri.listen(0, "127.0.0.1", resolve));
+    const port = mockAri.address().port;
+
+    try {
+        const client = createAriClient({
+            logTag: "ari-test",
+            getConfig: () => ({
+                enabled: true,
+                baseUrl: `http://127.0.0.1:${port}`,
+                username: "ariana",
+                password: "secret",
+                appName: "ariana-trunk",
+                requestTimeoutMs: 5000,
+            }),
+        });
+
+        client.ingestEventForTest({
+            type: "StasisStart",
+            application: "ariana-trunk",
+            args: [],
+            channel: {
+                id: "chan-reason-1",
+                name: "Local/002@simulador-cola-0001;2",
+                state: "Up",
+                caller: { number: "0991000002", name: "Paciente 002" },
+                dialplan: { context: "ariana-ari", exten: "s" },
+            },
+        });
+
+        await client.hangupSession("chan-reason-1", "laravel_agent_97_hangup");
+        await client.hangupSession("chan-reason-1", "busy");
+        await client.hangupSession("chan-reason-1", "no-answer");
+        await client.hangupSession("chan-reason-1", "congestion");
+
+        assert.deepStrictEqual(receivedReasons, ["normal", "busy", "no_answer", "congestion"]);
+    } finally {
+        mockAri.close();
+    }
+}
+
 async function main() {
     testLinearInterpolationAndFraming();
     await testWebSocketCodecNegotiation();
-    console.log("ARI ulaw WebSocket & interpolation tests passed");
+    await testAriHangupReasonNormalization();
+    console.log("ARI ulaw WebSocket, interpolation & hangup reason tests passed");
 }
 
 main().catch((error) => {

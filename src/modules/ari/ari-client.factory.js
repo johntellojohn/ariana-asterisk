@@ -441,12 +441,23 @@ function createAriClient(options = {}) {
         return snapshotSession(session);
     }
 
+    function normalizeAriHangupReason(reason) {
+        const clean = String(reason || "").trim().toLowerCase();
+        if (clean === "normal" || clean === "busy" || clean === "congestion" || clean === "no_answer") {
+            return clean;
+        }
+        if (clean === "noanswer" || clean === "no-answer") {
+            return "no_answer";
+        }
+        return "normal";
+    }
+
     async function hangupSession(channelId, reason = "normal") {
         const session = requireSession(channelId);
 
         await ariRequest("delete", `/channels/${encodeURIComponent(channelId)}`, {
             params: {
-                reason,
+                reason: normalizeAriHangupReason(reason),
             },
         });
 
