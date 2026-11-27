@@ -401,6 +401,7 @@ async function startMediaSessionByLinkedId(linkedid, options = {}) {
         await createExternalMediaChannel(mediaSession);
         mediaSession.status = "ready";
         mediaSession.updatedAt = new Date().toISOString();
+        scheduleOrphanWsWatchdog(mediaSession);
 
         const call = typeof pbxService.getCallByLinkedId === "function" ? pbxService.getCallByLinkedId(targetLinkedid) : null;
         let agentExt =
@@ -626,13 +627,66 @@ function listMediaSessions() {
     return Array.from(mediaSessionsById.values()).map(snapshotMediaSession);
 }
 
-async function closeMediaSession(idOrLinkedid, reason = "closed") {
+function clearOrphanWsWatchdog(session) {
+    if (session && session.orphanWsTimer) {
+        clearTimeout(session.orphanWsTimer);
+        session.orphanWsTimer = null;
+    }
+}
+
+function scheduleOrphanWsWatchdog(session) {
+    clearOrphanWsWatchdog(session);
+
+    const timeoutMs = Number(env.ariMediaOrphanWsTimeoutMs || 0);
+    if (!session || session.owner !== "agent" || session.status === "closed" || timeoutMs <= 0) {
+        return;
+    }
+
+    session.orphanWsTimer = setTimeout(() => {
+        session.orphanWsTimer = null;
+
+        if (session.status === "closed" || session.owner !== "agent") {
+            return;
+        }
+        if (session.agentWs && session.agentWs.readyState === 1) {
+            return;
+        }
+        if (Number(session.agentFramesReceived || 0) > 0) {
+            return;
+        }
+
+        console.warn("[ari:media] closing orphan media session without agent websocket", {
+            linkedid: session.linkedid,
+            sessionId: session.id,
+            rtpPort: session.rtpPort,
+            timeoutMs,
+            pausedAgentExtension: session.pausedAgentExtension || null,
+        });
+
+        closeMediaSession(session.id, "agent_ws_connect_timeout", {
+            hangupChannel: true,
+        }).catch((error) => {
+            console.warn("[ari:media] orphan media session close failed", {
+                linkedid: session.linkedid,
+                message: error.message,
+            });
+        });
+    }, timeoutMs);
+
+    if (typeof session.orphanWsTimer.unref === "function") {
+        session.orphanWsTimer.unref();
+    }
+}
+
+async function closeMediaSession(idOrLinkedid, reason = "closed", options = {}) {
     const key = String(idOrLinkedid || "").trim();
     const session = mediaSessionsById.get(key) || mediaSessionsByLinkedId.get(key);
 
     if (!session || session.status === "closed") {
         return session ? snapshotMediaSession(session) : null;
     }
+
+    clearOrphanWsWatchdog(session);
 
     session.status = "closed";
     session.closedAt = new Date().toISOString();
@@ -678,18 +732,26 @@ async function closeMediaSession(idOrLinkedid, reason = "closed") {
         ariBridgeService.releaseBridgeToken(session.bridgeToken);
     }
 
+    const shouldHangupPrimaryChannel = (
+        Boolean(options.hangupChannel) ||
+        (
+            (session.transport || "ari_media") === "sip_bridge" &&
+            reason !== "bridge_channel_ended" &&
+            reason !== "transfer_in_progress"
+        )
+    );
+
     if (
-        (session.transport || "ari_media") === "sip_bridge" &&
-        reason !== "bridge_channel_ended" &&
-        reason !== "transfer_in_progress" &&
+        shouldHangupPrimaryChannel &&
         session.channelId &&
         typeof ariClient.hangupSession === "function"
     ) {
         await ariClient.hangupSession(session.channelId, "normal").catch((error) => {
             if (error.response?.status !== 404) {
-                console.warn("[ari:media] sip bridge leg hangup failed", {
+                console.warn("[ari:media] primary channel hangup failed", {
                     linkedid: session.linkedid,
                     channelId: session.channelId,
+                    reason,
                     message: error.message,
                 });
             }
@@ -738,34 +800,54 @@ async function closeMediaSession(idOrLinkedid, reason = "closed") {
         const queue = session.pausedQueue || "650";
         session.pausedAgentExtension = null;
 
-        let stillInAnotherSession = false;
-        for (const other of mediaSessionsById.values()) {
-            if (other !== session && other.status !== "closed" && String(other.pausedAgentExtension || "").trim() === agentExt) {
-                stillInAnotherSession = true;
-                break;
-            }
-        }
+        if (!options.skipUnpause) {
+            const runUnpause = () => {
+                let stillInAnotherSession = false;
+                for (const other of mediaSessionsById.values()) {
+                    if (other !== session && other.status !== "closed" && String(other.pausedAgentExtension || "").trim() === agentExt) {
+                        stillInAnotherSession = true;
+                        break;
+                    }
+                }
 
-        if (!stillInAnotherSession) {
-            pbxService.pauseQueueMember({
-                extension: agentExt,
-                paused: false,
-                reason: "available",
-                queue,
-            })
-                .then(() => {
-                    console.log("[ari:media] agent unpaused in queue after call closed", {
-                        agentExt,
-                        queue,
-                        linkedid: session.linkedid,
-                    });
+                if (stillInAnotherSession) {
+                    return;
+                }
+
+                pbxService.pauseQueueMember({
+                    extension: agentExt,
+                    paused: false,
+                    reason: "available",
+                    queue,
                 })
-                .catch((err) => {
-                    console.warn("[ari:media] failed to unpause agent in queue", {
-                        agentExt,
-                        error: err.message,
+                    .then(() => {
+                        console.log("[ari:media] agent unpaused in queue after call closed", {
+                            agentExt,
+                            queue,
+                            linkedid: session.linkedid,
+                            reason,
+                        });
+                    })
+                    .catch((err) => {
+                        console.warn("[ari:media] failed to unpause agent in queue", {
+                            agentExt,
+                            error: err.message,
+                        });
                     });
-                });
+            };
+
+            const unpauseDelayMs = reason === "agent_ws_connect_timeout"
+                ? 0
+                : Math.max(0, Number(env.ariMediaAutoUnpauseDelayMs || 0));
+
+            if (unpauseDelayMs > 0) {
+                const timer = setTimeout(runUnpause, unpauseDelayMs);
+                if (typeof timer.unref === "function") {
+                    timer.unref();
+                }
+            } else {
+                runUnpause();
+            }
         }
     }
 
@@ -801,6 +883,8 @@ function attachAgentWebSocket(linkedid, ws, options = {}) {
 
     const requestedCodec = String(options.codec || "").trim().toLowerCase();
     const negotiatedCodec = requestedCodec === "ulaw" ? "ulaw" : "pcm48";
+
+    clearOrphanWsWatchdog(session);
 
     session.agentWs = ws;
     session.agentCodec = negotiatedCodec;
@@ -987,6 +1071,7 @@ function activateAiOwner(idOrLinkedid, options = {}) {
         throw error;
     }
 
+    clearOrphanWsWatchdog(session);
     clearAsteriskAudioQueue(session.id, "human_to_ai_transfer");
     session.owner = "ai";
     session.aiAgentId = options.agentId || options.agent_id || null;
@@ -1113,6 +1198,7 @@ function createMediaSession(linkedid, ariSession, options = {}) {
         rtpSendQueue: [],
         rtpSendTimer: null,
         rtpNextSendAt: 0,
+        orphanWsTimer: null,
         recording: new CallRecording({
             sessionId: id,
             callId: linkedid,

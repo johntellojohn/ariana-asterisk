@@ -15,6 +15,8 @@ process.env.TRUNK_HUMAN_DISCONNECT_TONE_ENABLED = "false";
 const ariService = require("../src/modules/ari/ari.service");
 const { createAriClient } = require("../src/modules/ari/ari-client.factory");
 const ariMediaService = require("../src/modules/ari/ari-media.service");
+const pbxService = require("../src/modules/pbx/pbx.service");
+const env = require("../src/config/env");
 const { attachAriWebSocketServer } = require("../src/modules/ari/ari.websocket");
 const {
     buildRtpPacket,
@@ -285,11 +287,101 @@ async function testAriHangupReasonNormalization() {
     }
 }
 
+async function testSkipUnpauseAndOrphanWsWatchdog() {
+    const prevOrphanMs = env.ariMediaOrphanWsTimeoutMs;
+    const prevAutoUnpauseMs = env.ariMediaAutoUnpauseDelayMs;
+    const origPause = pbxService.pauseQueueMember;
+    const origHangup = ariService.hangupSession;
+    const origAriReq = ariService.ariRequest;
+    const pauseCalls = [];
+    const hangupCalls = [];
+
+    pbxService.pauseQueueMember = async (opts) => {
+        pauseCalls.push(opts);
+        return { ok: true };
+    };
+    ariService.hangupSession = async (channelId, reason) => {
+        hangupCalls.push({ channelId, reason });
+        return { channelId, status: "ended" };
+    };
+    ariService.ariRequest = async (method, urlPath, config = {}) => {
+        if (method === "post" && urlPath === "/channels/externalMedia") {
+            return { data: { id: `UnicastRTP/watchdog-${Date.now()}` } };
+        }
+        if (method === "get" && urlPath.includes("/variable")) {
+            return {
+                data: {
+                    value: config?.params?.variable === "UNICASTRTP_LOCAL_ADDRESS" ? "127.0.0.1" : "19555",
+                },
+            };
+        }
+        return { data: { ok: true } };
+    };
+
+    try {
+        env.ariMediaAutoUnpauseDelayMs = 0;
+
+        // 1. skipUnpause: true must NOT call pauseQueueMember(paused: false)
+        env.ariMediaOrphanWsTimeoutMs = 5000;
+        const s1 = await ariMediaService.startMediaSessionByLinkedId("linked-skip-unpause", {
+            owner: "agent",
+            agentId: "97",
+            agentExtension: "150",
+            queue: "650",
+            transcribeRecording: false,
+        });
+        await new Promise((r) => setTimeout(r, 20));
+        pauseCalls.length = 0;
+
+        await ariMediaService.closeMediaSession(s1.id, "laravel_agent_97_hangup", { skipUnpause: true });
+        await new Promise((r) => setTimeout(r, 30));
+        assert.strictEqual(
+            pauseCalls.filter((c) => c.paused === false).length,
+            0,
+            "skipUnpause: true must suppress immediate gateway auto-unpause"
+        );
+
+        // 2. Orphan WS watchdog: session with no WS must auto-close, hangup primary channel & unpause agent
+        env.ariMediaOrphanWsTimeoutMs = 60;
+        pauseCalls.length = 0;
+        hangupCalls.length = 0;
+
+        const s2 = await ariMediaService.startMediaSessionByLinkedId("linked-orphan-ws", {
+            owner: "agent",
+            agentId: "2",
+            agentExtension: "101",
+            queue: "650",
+            transcribeRecording: false,
+        });
+        assert.ok(ariMediaService.getMediaSession(s2.id), "Session should exist before timeout");
+
+        await new Promise((r) => setTimeout(r, 140));
+        assert.strictEqual(
+            ariMediaService.getMediaSession(s2.id),
+            null,
+            "Orphan session without WebSocket must auto-close after timeout"
+        );
+        assert.strictEqual(hangupCalls.length, 1, "Orphan watchdog must hang up primary Stasis channel");
+        assert.strictEqual(hangupCalls[0].channelId, "PJSIP/sim-linked-orphan-ws");
+        assert.ok(
+            pauseCalls.some((c) => c.extension === "101" && c.paused === false),
+            "Orphan watchdog must unpause agent 101 in queue 650"
+        );
+    } finally {
+        env.ariMediaOrphanWsTimeoutMs = prevOrphanMs;
+        env.ariMediaAutoUnpauseDelayMs = prevAutoUnpauseMs;
+        pbxService.pauseQueueMember = origPause;
+        ariService.hangupSession = origHangup;
+        ariService.ariRequest = origAriReq;
+    }
+}
+
 async function main() {
     testLinearInterpolationAndFraming();
     await testWebSocketCodecNegotiation();
     await testAriHangupReasonNormalization();
-    console.log("ARI ulaw WebSocket, interpolation & hangup reason tests passed");
+    await testSkipUnpauseAndOrphanWsWatchdog();
+    console.log("ARI ulaw WebSocket, interpolation, hangup reason & orphan watchdog tests passed");
 }
 
 main().catch((error) => {

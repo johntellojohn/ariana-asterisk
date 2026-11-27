@@ -251,9 +251,15 @@ async function startCallMediaSession(req, res, next) {
 
 async function closeCallMediaSession(req, res, next) {
     try {
+        const skipUnpause = Boolean(
+            req.body?.skip_unpause === true ||
+            req.body?.skipUnpause === true ||
+            req.body?.unpause === false
+        );
         const session = await ariMediaService.closeMediaSession(
             req.params.linkedid,
-            req.body.reason || "closed_by_api"
+            req.body?.reason || "closed_by_api",
+            { skipUnpause }
         );
 
         if (!session) {
