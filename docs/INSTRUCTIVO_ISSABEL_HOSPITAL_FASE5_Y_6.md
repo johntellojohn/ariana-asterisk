@@ -143,8 +143,10 @@ write = system,call,log,verbose,command,agent,user,config,originate,reporting
 1. Clonar/actualizar `ariana-asterisk` en `main` en el servidor LAN:
    ```bash
    cp .env.example .env
-   # En .env (solo ~11 variables de arranque Docker): definir ADMIN_BOOTSTRAP_PASSWORD, SIP_BRIDGE_PUBLIC_IP (IP LAN Docker)
-   # y descomentar COMPOSE_FILE=docker-compose.yml:docker-compose.ssl.yml + API_HOST_PORT=127.0.0.1:3002
+   # En .env (solo ~11 variables de arranque Docker): definir ADMIN_BOOTSTRAP_PASSWORD
+   # - Con SSL: descomentar COMPOSE_FILE=docker-compose.yml:docker-compose.ssl.yml + API_HOST_PORT=127.0.0.1:3002
+   # - Solo en Issabel 4 / Asterisk < 16.6 (Plan A sip_bridge): descomentar COMPOSE_PROFILES=sip-bridge y definir SIP_BRIDGE_PUBLIC_IP
+   #   (en Issabel 5 / Asterisk >= 16.6 dejar COMPOSE_PROFILES comentado para no levantar asterisk-media-bridge)
    # (Nota: en servidores ya inicializados NO cambiar CONFIG_MASTER_KEY para no invalidar ./data/config.enc.json)
    mkdir -p ./data ./logs ./nginx/certs
    # Copiar los 2 archivos del certificado SSL en ./nginx/certs/fullchain.pem y ./nginx/certs/key.pem (sin editar Nginx)

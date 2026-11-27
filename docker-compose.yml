@@ -33,6 +33,8 @@ services:
       - ariana-asterisk-network
 
   asterisk-media-bridge:
+    profiles:
+      - sip-bridge
     build:
       context: ./asterisk-bridge
       dockerfile: Dockerfile

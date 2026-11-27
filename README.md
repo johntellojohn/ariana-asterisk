@@ -205,6 +205,18 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
+El despliegue se controla unicamente desde `.env` (sin flags `-f` ni nombres de servicios):
+
+- **SSL con Nginx:** descomentar `COMPOSE_FILE=docker-compose.yml:docker-compose.ssl.yml` y `API_HOST_PORT=127.0.0.1:3002` en `.env` (con certificados en `./nginx/certs/`).
+- **Issabel 5 / Asterisk >= 16.6 (`ari_media` nativo):** dejar `COMPOSE_PROFILES` comentado (solo levanta `api` y, si aplica SSL, `nginx`).
+- **Issabel 4 / Asterisk < 16.6 (`sip_bridge`):** descomentar `COMPOSE_PROFILES=sip-bridge` en `.env` para levantar tambien `asterisk-media-bridge`.
+
+Para actualizar cualquier servidor en produccion basta siempre:
+
+```bash
+git pull && docker compose up -d --build
+```
+
 Por defecto Docker publica el servicio en el puerto `366` del servidor:
 
 ```text
