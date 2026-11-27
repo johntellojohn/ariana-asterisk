@@ -63,7 +63,7 @@ function buildRtpPacket(payload, state, options = {}) {
     return Buffer.concat([header, payloadBuffer]);
 }
 
-function decodeUlawPayloadToPcm48(payload) {
+function decodeUlawPayloadToPcm48(payload, state = null) {
     const pcm8 = new Int16Array(payload.length);
 
     for (let index = 0; index < payload.length; index += 1) {
@@ -72,16 +72,52 @@ function decodeUlawPayloadToPcm48(payload) {
 
     const pcm48 = new Int16Array(pcm8.length * PCM_RATIO_48_TO_8);
 
+    if (pcm8.length === 0) {
+        return int16ToBufferLE(pcm48);
+    }
+
+    let prevSample = state && Number.isFinite(state.prevUlawDecodeSample)
+        ? state.prevUlawDecodeSample
+        : pcm8[0];
+
     for (let index = 0; index < pcm8.length; index += 1) {
-        const sample = pcm8[index];
+        const currSample = pcm8[index];
+        const delta = currSample - prevSample;
         const offset = index * PCM_RATIO_48_TO_8;
 
-        for (let duplicate = 0; duplicate < PCM_RATIO_48_TO_8; duplicate += 1) {
-            pcm48[offset + duplicate] = sample;
+        for (let step = 0; step < PCM_RATIO_48_TO_8; step += 1) {
+            const interpolated = Math.round(prevSample + (delta * (step + 1)) / PCM_RATIO_48_TO_8);
+            pcm48[offset + step] = Math.max(-32768, Math.min(32767, interpolated));
         }
+
+        prevSample = currSample;
+    }
+
+    if (state && typeof state === "object") {
+        state.prevUlawDecodeSample = prevSample;
     }
 
     return int16ToBufferLE(pcm48);
+}
+
+function ulawBufferToPayloads(buffer, state, frameSamples = 160) {
+    const input = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer || []);
+    if (!input.length) {
+        return [];
+    }
+
+    state.ulawRemainder = state.ulawRemainder && state.ulawRemainder.length
+        ? Buffer.concat([state.ulawRemainder, input])
+        : input;
+
+    const payloads = [];
+
+    while (state.ulawRemainder.length >= frameSamples) {
+        payloads.push(Buffer.from(state.ulawRemainder.subarray(0, frameSamples)));
+        state.ulawRemainder = state.ulawRemainder.subarray(frameSamples);
+    }
+
+    return payloads;
 }
 
 function pcm48BufferToUlawPayloads(buffer, state, frameSamples = 160) {
@@ -188,6 +224,9 @@ module.exports = {
     BROWSER_SAMPLE_RATE,
     parseRtpPacket,
     buildRtpPacket,
+    decodeUlaw,
+    encodeUlaw,
     decodeUlawPayloadToPcm48,
     pcm48BufferToUlawPayloads,
+    ulawBufferToPayloads,
 };

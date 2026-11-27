@@ -19,6 +19,7 @@ const {
     buildRtpPacket,
     decodeUlawPayloadToPcm48,
     pcm48BufferToUlawPayloads,
+    ulawBufferToPayloads,
 } = require("./rtp-media");
 
 const mediaSessionsById = new Map();
@@ -798,21 +799,45 @@ function attachAgentWebSocket(linkedid, ws, options = {}) {
         session.agentWs.close(1000, "agent_replaced");
     }
 
+    const requestedCodec = String(options.codec || "").trim().toLowerCase();
+    const negotiatedCodec = requestedCodec === "ulaw" ? "ulaw" : "pcm48";
+
     session.agentWs = ws;
+    session.agentCodec = negotiatedCodec;
     session.activeAgentId = options.agentId || null;
     session.status = "agent_connected";
     session.updatedAt = new Date().toISOString();
     session.disconnectToneArmed = false;
     session.disconnectToneClosed = false;
+    session.codecState = {
+        downsampleRemainder: new Int16Array(0),
+        ulawRemainder: Buffer.alloc(0),
+        prevUlawDecodeSample: null,
+        agentUlawDecodeState: { prevUlawDecodeSample: null },
+    };
     disconnectToneDetector.reset(session);
 
     if (session.recording) {
         session.recording.agentId = session.activeAgentId;
     }
 
+    if (session.agentCodec === "ulaw" && ws.readyState === 1) {
+        try {
+            ws.send(JSON.stringify({
+                type: "audio_config",
+                codec: "ulaw",
+                sampleRate: 8000,
+                frameMs: env.ariExternalMediaFrameMs,
+            }));
+        } catch (error) {
+            session.lastError = error.message;
+        }
+    }
+
     console.log("[ari:media] agent websocket connected", {
         linkedid: session.linkedid,
         agentId: session.activeAgentId,
+        agentCodec: session.agentCodec,
     });
 
     ws.on("message", (message, isBinary) => {
@@ -821,6 +846,11 @@ function attachAgentWebSocket(linkedid, ws, options = {}) {
         }
 
         const buffer = Buffer.isBuffer(message) ? message : Buffer.from(message);
+        if (session.agentCodec === "ulaw") {
+            sendAgentUlawToAsterisk(session, buffer);
+            return;
+        }
+
         sendAgentAudioToAsterisk(session, buffer);
     });
 
@@ -1058,6 +1088,7 @@ function createMediaSession(linkedid, ariSession, options = {}) {
         agentWebSocketPath: agentAccess.path,
         agentWebSocketUrl: agentAccess.url,
         agentWs: null,
+        agentCodec: "pcm48",
         activeAgentId: startsWithAi ? null : options.agentId || null,
         aiAgentId: startsWithAi ? options.agentId || null : null,
         lastTransferId: null,
@@ -1071,6 +1102,8 @@ function createMediaSession(linkedid, ariSession, options = {}) {
         codecState: {
             downsampleRemainder: new Int16Array(0),
             ulawRemainder: Buffer.alloc(0),
+            prevUlawDecodeSample: null,
+            agentUlawDecodeState: { prevUlawDecodeSample: null },
         },
         rtpSendState: {
             sequence: crypto.randomInt(0, 0xffff),
@@ -1292,20 +1325,27 @@ function handleRtpPacket(session, packet) {
     session.rtpPacketsReceived += 1;
     session.updatedAt = new Date().toISOString();
 
-    const pcm48 = decodeUlawPayloadToPcm48(rtp.payload);
+    const isUlawBrowser = session.agentCodec === "ulaw";
+    const needsPcm48 = Boolean(
+        !isUlawBrowser
+        || session.recording
+        || typeof session.onAsteriskPcm48 === "function"
+        || env.trunkHumanDisconnectToneEnabled
+    );
+    const pcm48 = needsPcm48 ? decodeUlawPayloadToPcm48(rtp.payload, session.codecState) : null;
 
-    if (trackHumanDisconnectTone(session, pcm48)) {
+    if (pcm48 && trackHumanDisconnectTone(session, pcm48)) {
         return;
     }
 
-    if (session.recording) {
+    if (pcm48 && session.recording) {
         session.recording.recordCustomerPcm(pcm48, {
             sampleRate: 48000,
             channelCount: 1,
         });
     }
 
-    if (typeof session.onAsteriskPcm48 === "function") {
+    if (pcm48 && typeof session.onAsteriskPcm48 === "function") {
         try {
             session.onAsteriskPcm48(pcm48, {
                 linkedid: session.linkedid,
@@ -1324,8 +1364,13 @@ function handleRtpPacket(session, packet) {
         return;
     }
 
+    const maxBuffered = isUlawBrowser ? 32768 : 131072;
+    if (session.agentWs.bufferedAmount > maxBuffered) {
+        return;
+    }
+
     try {
-        session.agentWs.send(pcm48, { binary: true });
+        session.agentWs.send(isUlawBrowser ? rtp.payload : pcm48, { binary: true });
         session.browserFramesSent += 1;
     } catch (error) {
         session.lastError = error.message;
@@ -1467,6 +1512,46 @@ function sendAgentAudioToAsterisk(session, pcm48Buffer) {
     }
 }
 
+function sendAgentUlawToAsterisk(session, ulawBuffer) {
+    session.agentFramesReceived += 1;
+    session.updatedAt = new Date().toISOString();
+
+    if (session.owner === "agent") {
+        session.disconnectToneArmed = true;
+    }
+
+    if (session.agentFramesReceived === 1) {
+        console.log("[ari:media] first browser audio frame received", {
+            linkedid: session.linkedid,
+            codec: "ulaw",
+            bytes: ulawBuffer.length,
+            hasRtpDestination: Boolean(session.remoteRtp),
+        });
+    }
+
+    if (session.recording) {
+        const decodeState = session.codecState?.agentUlawDecodeState || null;
+        const agentPcm48 = decodeUlawPayloadToPcm48(ulawBuffer, decodeState);
+        session.recording.recordAgentPcm(agentPcm48, {
+            sampleRate: 48000,
+            channelCount: 1,
+        });
+    }
+
+    if (!session.rtpSocket || !session.remoteRtp) {
+        session.agentFramesDroppedNoRtp += 1;
+        return;
+    }
+
+    const frameSamples = Math.max(1, Math.round(8000 * env.ariExternalMediaFrameMs / 1000));
+    const payloads = ulawBufferToPayloads(ulawBuffer, session.codecState, frameSamples);
+
+    if (payloads.length > 0) {
+        enqueueRtpPayloads(session, payloads);
+        startRtpSendTimer(session);
+    }
+}
+
 function enqueueRtpPayloads(session, payloads) {
     session.rtpSendQueue.push(...payloads);
 
@@ -1590,6 +1675,7 @@ function snapshotMediaSession(session) {
         agentWebSocketUrl: session.agentWebSocketUrl,
         agentWebSocketPath: session.agentWebSocketPath,
         hasAgentWebSocket: Boolean(session.agentWs && session.agentWs.readyState === 1),
+        agentCodec: session.agentCodec || "pcm48",
         format: env.ariExternalMediaFormat,
         lastError: session.lastError,
     };
@@ -1628,6 +1714,8 @@ function clearAsteriskAudioQueue(idOrLinkedid, reason = "cleared") {
     session.codecState = {
         downsampleRemainder: new Int16Array(0),
         ulawRemainder: Buffer.alloc(0),
+        prevUlawDecodeSample: session.codecState?.prevUlawDecodeSample ?? null,
+        agentUlawDecodeState: { prevUlawDecodeSample: null },
     };
     session.updatedAt = new Date().toISOString();
 

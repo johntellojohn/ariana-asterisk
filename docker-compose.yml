@@ -13,6 +13,11 @@ services:
     volumes:
       - ./logs:/app/logs
       - ./data:/app/data
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
     healthcheck:
       test:
         [
@@ -53,6 +58,11 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "25m"
+        max-file: "3"
     networks:
       - ariana-asterisk-network
 

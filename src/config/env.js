@@ -219,7 +219,7 @@ const env = {
     ariExternalMediaFormat: process.env.ARI_EXTERNAL_MEDIA_FORMAT || "ulaw",
     ariExternalMediaPayloadType: toNumber(process.env.ARI_EXTERNAL_MEDIA_PAYLOAD_TYPE, 0),
     ariExternalMediaFrameMs: toNumber(process.env.ARI_EXTERNAL_MEDIA_FRAME_MS, 20),
-    ariExternalMediaMaxQueueMs: toNumber(process.env.ARI_EXTERNAL_MEDIA_MAX_QUEUE_MS, 200),
+    ariExternalMediaMaxQueueMs: toNumber(process.env.ARI_EXTERNAL_MEDIA_MAX_QUEUE_MS, 320),
 
     // Headless Asterisk SIP Media Bridge (Fase 4B.2 para PBX Asterisk < 16.6)
     sipBridgeEnabled: toBoolean(process.env.SIP_BRIDGE_ENABLED, false),
