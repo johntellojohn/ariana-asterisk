@@ -367,6 +367,36 @@ async function testSkipUnpauseAndOrphanWsWatchdog() {
             pauseCalls.some((c) => c.extension === "101" && c.paused === false),
             "Orphan watchdog must unpause agent 101 in queue 650"
         );
+
+        // 3. Atomic hangup: closeMediaSession(hangupChannel: true, unpauseImmediate: true) hangs up & unpauses immediately
+        env.ariMediaOrphanWsTimeoutMs = 5000;
+        env.ariMediaAutoUnpauseDelayMs = 1500;
+        pauseCalls.length = 0;
+        hangupCalls.length = 0;
+
+        const s3 = await ariMediaService.startMediaSessionByLinkedId("linked-atomic-hangup", {
+            owner: "agent",
+            agentId: "97",
+            agentExtension: "150",
+            queue: "650",
+            transcribeRecording: false,
+        });
+        await new Promise((r) => setTimeout(r, 20));
+        pauseCalls.length = 0;
+
+        const closedAtomic = await ariMediaService.closeMediaSession(s3.id, "laravel_agent_97_hangup", {
+            hangupChannel: true,
+            unpauseImmediate: true,
+            unpauseReason: "agent_hangup",
+        });
+        assert.strictEqual(closedAtomic.primaryChannelHungUp, true, "Atomic close must hang up primary channel");
+        assert.strictEqual(closedAtomic.agentUnpaused, true, "Atomic close must immediately unpause agent");
+        assert.strictEqual(hangupCalls.length, 1, "Primary channel hangup invoked once");
+        assert.strictEqual(hangupCalls[0].channelId, "PJSIP/sim-linked-atomic-hangup");
+        assert.ok(
+            pauseCalls.some((c) => c.extension === "150" && c.paused === false && c.reason === "agent_hangup"),
+            "Atomic close must await immediate unpause with agent_hangup reason without waiting 1500ms"
+        );
     } finally {
         env.ariMediaOrphanWsTimeoutMs = prevOrphanMs;
         env.ariMediaAutoUnpauseDelayMs = prevAutoUnpauseMs;

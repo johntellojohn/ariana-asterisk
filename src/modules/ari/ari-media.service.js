@@ -741,21 +741,38 @@ async function closeMediaSession(idOrLinkedid, reason = "closed", options = {}) 
         )
     );
 
+    session.primaryChannelHungUp = false;
+    session.agentUnpaused = false;
+
     if (
         shouldHangupPrimaryChannel &&
         session.channelId &&
         typeof ariClient.hangupSession === "function"
     ) {
-        await ariClient.hangupSession(session.channelId, "normal").catch((error) => {
-            if (error.response?.status !== 404) {
-                console.warn("[ari:media] primary channel hangup failed", {
-                    linkedid: session.linkedid,
-                    channelId: session.channelId,
-                    reason,
-                    message: error.message,
-                });
-            }
-        });
+        await ariClient.hangupSession(session.channelId, "normal")
+            .then(() => {
+                session.primaryChannelHungUp = true;
+            })
+            .catch((error) => {
+                if (error.response?.status === 404) {
+                    session.primaryChannelHungUp = true;
+                } else {
+                    console.warn("[ari:media] primary channel hangup failed", {
+                        linkedid: session.linkedid,
+                        channelId: session.channelId,
+                        reason,
+                        message: error.message,
+                    });
+                }
+            });
+    }
+
+    if (
+        Boolean(options.hangupChannel) &&
+        (session.transport || "ari_media") === "sip_bridge" &&
+        typeof pbxService.hangupCall === "function"
+    ) {
+        await pbxService.hangupCall(session.linkedid, reason).catch(() => {});
     }
 
     if (session.recording) {
@@ -795,58 +812,65 @@ async function closeMediaSession(idOrLinkedid, reason = "closed", options = {}) 
         }
     }
 
-    if (session.pausedAgentExtension && typeof pbxService.pauseQueueMember === "function") {
-        const agentExt = session.pausedAgentExtension;
-        const queue = session.pausedQueue || "650";
-        session.pausedAgentExtension = null;
+    const agentExt = String(session.pausedAgentExtension || options.agentExtension || "").trim() || null;
+    const queue = String(session.pausedQueue || options.queue || "").trim() || "650";
+    const unpauseReason = String(options.unpauseReason || "").trim() || "available";
+    session.pausedAgentExtension = null;
 
-        if (!options.skipUnpause) {
-            const runUnpause = () => {
-                let stillInAnotherSession = false;
-                for (const other of mediaSessionsById.values()) {
-                    if (other !== session && other.status !== "closed" && String(other.pausedAgentExtension || "").trim() === agentExt) {
-                        stillInAnotherSession = true;
-                        break;
-                    }
+    if (agentExt && typeof pbxService.pauseQueueMember === "function" && !options.skipUnpause) {
+        const runUnpause = async () => {
+            let stillInAnotherSession = false;
+            for (const other of mediaSessionsById.values()) {
+                if (other !== session && other.status !== "closed" && String(other.pausedAgentExtension || "").trim() === agentExt) {
+                    stillInAnotherSession = true;
+                    break;
                 }
+            }
 
-                if (stillInAnotherSession) {
-                    return;
-                }
+            if (stillInAnotherSession) {
+                return false;
+            }
 
-                pbxService.pauseQueueMember({
+            try {
+                await pbxService.pauseQueueMember({
                     extension: agentExt,
                     paused: false,
-                    reason: "available",
+                    reason: unpauseReason,
                     queue,
-                })
-                    .then(() => {
-                        console.log("[ari:media] agent unpaused in queue after call closed", {
-                            agentExt,
-                            queue,
-                            linkedid: session.linkedid,
-                            reason,
-                        });
-                    })
-                    .catch((err) => {
-                        console.warn("[ari:media] failed to unpause agent in queue", {
-                            agentExt,
-                            error: err.message,
-                        });
-                    });
-            };
+                });
+                session.agentUnpaused = true;
+                console.log("[ari:media] agent unpaused in queue after call closed", {
+                    agentExt,
+                    queue,
+                    linkedid: session.linkedid,
+                    reason: unpauseReason,
+                });
+                return true;
+            } catch (err) {
+                console.warn("[ari:media] failed to unpause agent in queue", {
+                    agentExt,
+                    error: err.message,
+                });
+                return false;
+            }
+        };
 
+        if (Boolean(options.unpauseImmediate)) {
+            await runUnpause();
+        } else {
             const unpauseDelayMs = reason === "agent_ws_connect_timeout"
                 ? 0
                 : Math.max(0, Number(env.ariMediaAutoUnpauseDelayMs || 0));
 
             if (unpauseDelayMs > 0) {
-                const timer = setTimeout(runUnpause, unpauseDelayMs);
+                const timer = setTimeout(() => {
+                    runUnpause().catch(() => {});
+                }, unpauseDelayMs);
                 if (typeof timer.unref === "function") {
                     timer.unref();
                 }
             } else {
-                runUnpause();
+                runUnpause().catch(() => {});
             }
         }
     }
@@ -1756,12 +1780,15 @@ function snapshotMediaSession(session) {
         disconnectToneBursts: session.disconnectToneBursts || 0,
         disconnectToneMs: Math.round(session.disconnectToneMs || 0),
         activeAgentId: session.activeAgentId,
+        pausedAgentExtension: session.pausedAgentExtension || null,
         aiAgentId: session.aiAgentId || null,
         lastTransferId: session.lastTransferId || null,
         agentWebSocketUrl: session.agentWebSocketUrl,
         agentWebSocketPath: session.agentWebSocketPath,
         hasAgentWebSocket: Boolean(session.agentWs && session.agentWs.readyState === 1),
         agentCodec: session.agentCodec || "pcm48",
+        primaryChannelHungUp: Boolean(session.primaryChannelHungUp),
+        agentUnpaused: Boolean(session.agentUnpaused),
         format: env.ariExternalMediaFormat,
         lastError: session.lastError,
     };

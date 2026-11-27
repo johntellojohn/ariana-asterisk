@@ -251,21 +251,111 @@ async function startCallMediaSession(req, res, next) {
 
 async function closeCallMediaSession(req, res, next) {
     try {
+        const linkedid = req.params.linkedid;
+        const reason = req.body?.reason || "closed_by_api";
         const skipUnpause = Boolean(
             req.body?.skip_unpause === true ||
             req.body?.skipUnpause === true ||
             req.body?.unpause === false
         );
+        const hangupChannel = Boolean(
+            req.body?.hangup_channel === true ||
+            req.body?.hangupChannel === true
+        );
+        const unpauseImmediate = Boolean(
+            req.body?.unpause_immediate === true ||
+            req.body?.unpauseImmediate === true
+        );
+        const unpauseReason = String(
+            req.body?.unpause_reason ||
+            req.body?.unpauseReason ||
+            ""
+        ).trim() || null;
+        const agentExtension = String(
+            req.body?.agent_extension ||
+            req.body?.agentExtension ||
+            req.body?.extension ||
+            ""
+        ).trim() || null;
+        const queue = String(req.body?.queue || "").trim() || null;
+
         const session = await ariMediaService.closeMediaSession(
-            req.params.linkedid,
-            req.body?.reason || "closed_by_api",
-            { skipUnpause }
+            linkedid,
+            reason,
+            {
+                skipUnpause,
+                hangupChannel,
+                unpauseImmediate,
+                unpauseReason,
+                agentExtension,
+                queue,
+            }
         );
 
         if (!session) {
-            return res.status(404).json({
-                ok: false,
-                message: "ARI media session not found",
+            if (!hangupChannel) {
+                return res.status(404).json({
+                    ok: false,
+                    message: "ARI media session not found",
+                });
+            }
+
+            let primaryChannelHungUp = false;
+            const bridgeSession = ariBridgeService.getSessionByLinkedId(linkedid);
+            if (bridgeSession) {
+                await ariBridgeService.hangupCallByLinkedId(linkedid, reason)
+                    .then(() => { primaryChannelHungUp = true; })
+                    .catch((err) => {
+                        if (err?.status === 404 || err?.response?.status === 404) {
+                            primaryChannelHungUp = true;
+                        }
+                    });
+                if (typeof pbxService.hangupCall === "function") {
+                    await pbxService.hangupCall(linkedid, reason).catch(() => {});
+                }
+            } else {
+                await ariService.hangupCallByLinkedId(linkedid, reason)
+                    .then(() => { primaryChannelHungUp = true; })
+                    .catch((err) => {
+                        if (err?.status === 404 || err?.response?.status === 404) {
+                            primaryChannelHungUp = true;
+                        }
+                    });
+            }
+
+            let agentUnpaused = false;
+            if (
+                unpauseImmediate &&
+                !skipUnpause &&
+                agentExtension &&
+                typeof pbxService.pauseQueueMember === "function"
+            ) {
+                const stillBusy = ariMediaService.listMediaSessions().some(
+                    (other) => other.status !== "closed"
+                        && String(other.linkedid || "") !== String(linkedid || "")
+                        && String(other.pausedAgentExtension || "") === agentExtension
+                );
+                if (!stillBusy) {
+                    await pbxService.pauseQueueMember({
+                        extension: agentExtension,
+                        paused: false,
+                        reason: unpauseReason || "agent_hangup",
+                        queue: queue || "650",
+                    })
+                        .then(() => { agentUnpaused = true; })
+                        .catch(() => {});
+                }
+            }
+
+            return res.json({
+                ok: true,
+                data: {
+                    linkedid,
+                    status: "closed",
+                    alreadyClosed: true,
+                    primaryChannelHungUp,
+                    agentUnpaused,
+                },
             });
         }
 
